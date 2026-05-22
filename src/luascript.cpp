@@ -14,6 +14,7 @@
 #include "events.h"
 #include "game.h"
 #include "housetile.h"
+#include "kv/kv.hpp"
 #include "luavariant.h"
 #include "matrixarea.h"
 #include "monster.h"
@@ -2745,6 +2746,7 @@ void LuaScriptInterface::registerFunctions()
 	registerGlobalEvents();
 	registerWeapons();
 	registerXML();
+	registerKV();
 }
 
 #undef registerEnum
@@ -2983,12 +2985,12 @@ int LuaScriptInterface::luaDoPlayerAddItem(lua_State* L)
 				uint32_t uid = getScriptEnv()->addThing(newItem);
 				lua_pushinteger(L, uid);
 				return 1;
-			} else {
-				// stackable item stacked with existing object, newItem will be released
-				Lua::pushBoolean(L, false);
-				return 1;
-			}
+		} else {
+			// stackable item stacked with existing object, newItem will be released
+			Lua::pushBoolean(L, false);
+			return 1;
 		}
+	}
 	}
 
 	Lua::pushBoolean(L, false);
@@ -4160,4 +4162,359 @@ void LuaEnvironment::executeTimerEvent(uint32_t eventIndex)
 	for (auto parameter : timerEventDesc.parameters) {
 		luaL_unref(luaState, LUA_REGISTRYINDEX, parameter);
 	}
+}
+
+void LuaScriptInterface::registerKV() {
+	// Global kv table
+	registerTable("kv");
+	registerMethod("kv", "scoped", LuaScriptInterface::luaKVScoped);
+	registerMethod("kv", "set", LuaScriptInterface::luaKVSet);
+	registerMethod("kv", "get", LuaScriptInterface::luaKVGet);
+	registerMethod("kv", "keys", LuaScriptInterface::luaKVKeys);
+	registerMethod("kv", "remove", LuaScriptInterface::luaKVRemove);
+
+	// KV metatable for scoped userdata
+	registerClass("KV", "", nullptr);
+	registerMetaMethod("KV", "__gc", LuaScriptInterface::luaKVGC);
+	registerMethod("KV", "scoped", LuaScriptInterface::luaKVScoped);
+	registerMethod("KV", "set", LuaScriptInterface::luaKVSet);
+	registerMethod("KV", "get", LuaScriptInterface::luaKVGet);
+	registerMethod("KV", "keys", LuaScriptInterface::luaKVKeys);
+	registerMethod("KV", "remove", LuaScriptInterface::luaKVRemove);
+}
+
+int LuaScriptInterface::luaKVScoped(lua_State* L) {
+	// kv.scoped(key) or scopedKV:scoped(key)
+	const auto key = Lua::getString(L, -1);
+
+	if (Lua::isUserdata(L, 1)) {
+		auto* ptr = static_cast<std::shared_ptr<KV>*>(luaL_testudata(L, 1, "KV"));
+		if (!ptr) {
+			luaL_error(L, "KV:scoped called on non-KV userdata");
+		}
+		auto newScope = (*ptr)->scoped(key);
+		Lua::pushSharedPtr(L, newScope);
+		Lua::setMetatable(L, -1, "KV");
+		return 1;
+	}
+
+	auto newScope = KVStore::getInstance().scoped(key);
+	Lua::pushSharedPtr(L, newScope);
+	Lua::setMetatable(L, -1, "KV");
+	return 1;
+}
+
+int LuaScriptInterface::luaKVSet(lua_State* L) {
+	// kv.set(key, value) or scopedKV:set(key, value)
+	const auto key = Lua::getString(L, -2);
+
+	if (Lua::isUserdata(L, 1)) {
+		auto* ptr = static_cast<std::shared_ptr<KV>*>(luaL_testudata(L, 1, "KV"));
+		if (!ptr) {
+			luaL_error(L, "KV:set called on non-KV userdata");
+		}
+		if (Lua::isBoolean(L, -1)) {
+			(*ptr)->set(key, ValueWrapper(Lua::getBoolean(L, -1)));
+		} else if (Lua::isNumber(L, -1)) {
+			double d = Lua::getNumber<double>(L, -1);
+			int64_t i = static_cast<int64_t>(d);
+			if (d == static_cast<double>(i) && i >= INT32_MIN && i <= INT32_MAX) {
+				(*ptr)->set(key, ValueWrapper(static_cast<int32_t>(i)));
+			} else {
+				(*ptr)->set(key, ValueWrapper(d));
+			}
+		} else if (Lua::isString(L, -1)) {
+			(*ptr)->set(key, ValueWrapper(Lua::getString(L, -1)));
+		} else if (Lua::isTable(L, -1)) {
+			if (lua_objlen(L, -1) > 0) {
+				ArrayType arr;
+				for (lua_Unsigned i = 1; i <= lua_objlen(L, -1); ++i) {
+					lua_rawgeti(L, -1, static_cast<lua_Integer>(i));
+					if (Lua::isBoolean(L, -1)) {
+						arr.emplace_back(Lua::getBoolean(L, -1));
+					} else if (Lua::isNumber(L, -1)) {
+						double d = Lua::getNumber<double>(L, -1);
+						int64_t iv = static_cast<int64_t>(d);
+						if (d == static_cast<double>(iv) && iv >= INT32_MIN && iv <= INT32_MAX) {
+							arr.emplace_back(static_cast<int32_t>(iv));
+						} else {
+							arr.emplace_back(d);
+						}
+					} else if (Lua::isString(L, -1)) {
+						arr.emplace_back(std::string(Lua::getString(L, -1)));
+					} else {
+						lua_pushnil(L);
+						return 1;
+					}
+					lua_pop(L, 1);
+				}
+				(*ptr)->set(key, ValueWrapper(arr));
+			} else {
+				MapType map;
+				lua_pushnil(L);
+				while (lua_next(L, -2) != 0) {
+					std::string mapKey = Lua::getString(L, -2);
+					if (Lua::isBoolean(L, -1)) {
+						map[mapKey] = std::make_shared<ValueWrapper>(Lua::getBoolean(L, -1));
+					} else if (Lua::isNumber(L, -1)) {
+						double d = Lua::getNumber<double>(L, -1);
+						int64_t iv = static_cast<int64_t>(d);
+						if (d == static_cast<double>(iv) && iv >= INT32_MIN && iv <= INT32_MAX) {
+							map[mapKey] = std::make_shared<ValueWrapper>(static_cast<int32_t>(iv));
+						} else {
+							map[mapKey] = std::make_shared<ValueWrapper>(d);
+						}
+					} else if (Lua::isString(L, -1)) {
+						map[mapKey] = std::make_shared<ValueWrapper>(std::string(Lua::getString(L, -1)));
+					}
+					lua_pop(L, 1);
+				}
+				(*ptr)->set(key, ValueWrapper(map));
+			}
+		} else {
+			Lua::pushBoolean(L, false);
+			return 1;
+		}
+		Lua::pushBoolean(L, true);
+		return 1;
+	}
+
+	// Global kv.set
+	if (Lua::isBoolean(L, -1)) {
+		KVStore::getInstance().set(key, ValueWrapper(Lua::getBoolean(L, -1)));
+	} else if (Lua::isNumber(L, -1)) {
+		double d = Lua::getNumber<double>(L, -1);
+		int64_t i = static_cast<int64_t>(d);
+		if (d == static_cast<double>(i) && i >= INT32_MIN && i <= INT32_MAX) {
+			KVStore::getInstance().set(key, ValueWrapper(static_cast<int32_t>(i)));
+		} else {
+			KVStore::getInstance().set(key, ValueWrapper(d));
+		}
+	} else if (Lua::isString(L, -1)) {
+		KVStore::getInstance().set(key, ValueWrapper(Lua::getString(L, -1)));
+	} else if (Lua::isTable(L, -1)) {
+		if (lua_objlen(L, -1) > 0) {
+			ArrayType arr;
+			for (lua_Unsigned i = 1; i <= lua_objlen(L, -1); ++i) {
+				lua_rawgeti(L, -1, static_cast<lua_Integer>(i));
+				if (Lua::isBoolean(L, -1)) {
+					arr.emplace_back(Lua::getBoolean(L, -1));
+				} else if (Lua::isNumber(L, -1)) {
+					double d = Lua::getNumber<double>(L, -1);
+					int64_t iv = static_cast<int64_t>(d);
+					if (d == static_cast<double>(iv) && iv >= INT32_MIN && iv <= INT32_MAX) {
+						arr.emplace_back(static_cast<int32_t>(iv));
+					} else {
+						arr.emplace_back(d);
+					}
+				} else if (Lua::isString(L, -1)) {
+					arr.emplace_back(std::string(Lua::getString(L, -1)));
+			} else {
+				lua_pushnil(L);
+				return 1;
+			}
+			lua_pop(L, 1);
+		}
+		KVStore::getInstance().set(key, ValueWrapper(arr));
+		} else {
+			MapType map;
+			lua_pushnil(L);
+			while (lua_next(L, -2) != 0) {
+				std::string mapKey = Lua::getString(L, -2);
+				if (Lua::isBoolean(L, -1)) {
+					map[mapKey] = std::make_shared<ValueWrapper>(Lua::getBoolean(L, -1));
+				} else if (Lua::isNumber(L, -1)) {
+					double d = Lua::getNumber<double>(L, -1);
+					int64_t iv = static_cast<int64_t>(d);
+					if (d == static_cast<double>(iv) && iv >= INT32_MIN && iv <= INT32_MAX) {
+						map[mapKey] = std::make_shared<ValueWrapper>(static_cast<int32_t>(iv));
+					} else {
+						map[mapKey] = std::make_shared<ValueWrapper>(d);
+					}
+				} else if (Lua::isString(L, -1)) {
+					map[mapKey] = std::make_shared<ValueWrapper>(std::string(Lua::getString(L, -1)));
+				}
+				lua_pop(L, 1);
+			}
+			KVStore::getInstance().set(key, ValueWrapper(map));
+		}
+	} else {
+		Lua::pushBoolean(L, false);
+		return 1;
+	}
+	Lua::pushBoolean(L, true);
+	return 1;
+}
+
+int LuaScriptInterface::luaKVGet(lua_State* L) {
+	// kv.get(key[, forceLoad]) or scopedKV:get(key[, forceLoad])
+	std::optional<ValueWrapper> valueWrapper;
+	bool forceLoad = false;
+	std::string key;
+
+	if (Lua::isBoolean(L, -1)) {
+		forceLoad = Lua::getBoolean(L, -1);
+		key = Lua::getString(L, -2);
+	} else {
+		key = Lua::getString(L, -1);
+	}
+
+	if (Lua::isUserdata(L, 1)) {
+		auto* ptr = static_cast<std::shared_ptr<KV>*>(luaL_testudata(L, 1, "KV"));
+		if (!ptr) {
+			luaL_error(L, "KV:get called on non-KV userdata");
+		}
+		valueWrapper = (*ptr)->get(key, forceLoad);
+	} else {
+		valueWrapper = KVStore::getInstance().get(key, forceLoad);
+	}
+
+	if (valueWrapper.has_value()) {
+		const auto &val = *valueWrapper;
+		std::visit([L](const auto &arg) {
+			using T = std::decay_t<decltype(arg)>;
+			if constexpr (std::is_same_v<T, StringType>) {
+				Lua::pushString(L, arg);
+			} else if constexpr (std::is_same_v<T, BooleanType>) {
+				Lua::pushBoolean(L, arg);
+			} else if constexpr (std::is_same_v<T, IntType>) {
+				lua_pushnumber(L, arg);
+			} else if constexpr (std::is_same_v<T, DoubleType>) {
+				lua_pushnumber(L, arg);
+			} else if constexpr (std::is_same_v<T, ArrayType>) {
+				lua_newtable(L);
+				for (size_t i = 0; i < arg.size(); ++i) {
+					const auto &item = arg[i];
+					auto var = item.getVariant();
+					std::visit([L](const auto &v) {
+						using VT = std::decay_t<decltype(v)>;
+						if constexpr (std::is_same_v<VT, StringType>) {
+							Lua::pushString(L, v);
+						} else if constexpr (std::is_same_v<VT, BooleanType>) {
+							Lua::pushBoolean(L, v);
+						} else if constexpr (std::is_same_v<VT, IntType>) {
+							lua_pushnumber(L, v);
+						} else if constexpr (std::is_same_v<VT, DoubleType>) {
+							lua_pushnumber(L, v);
+						} else if constexpr (std::is_same_v<VT, ArrayType>) {
+							lua_newtable(L);
+							for (size_t j = 0; j < v.size(); ++j) {
+								const auto &inner = v[j].getVariant();
+								std::visit([L](const auto &iv) {
+									using IVT = std::decay_t<decltype(iv)>;
+									if constexpr (std::is_same_v<IVT, StringType>) Lua::pushString(L, iv);
+									else if constexpr (std::is_same_v<IVT, BooleanType>) Lua::pushBoolean(L, iv);
+									else if constexpr (std::is_same_v<IVT, IntType>) lua_pushnumber(L, iv);
+									else if constexpr (std::is_same_v<IVT, DoubleType>) lua_pushnumber(L, iv);
+									else lua_pushnil(L);
+								}, inner);
+								lua_rawseti(L, -2, static_cast<lua_Integer>(j + 1));
+							}
+						} else if constexpr (std::is_same_v<VT, MapType>) {
+							lua_newtable(L);
+							for (const auto &[mk, mv] : v) {
+								const auto &inner = mv->getVariant();
+								std::visit([L](const auto &iv) {
+									using IVT = std::decay_t<decltype(iv)>;
+									if constexpr (std::is_same_v<IVT, StringType>) Lua::pushString(L, iv);
+									else if constexpr (std::is_same_v<IVT, BooleanType>) Lua::pushBoolean(L, iv);
+									else if constexpr (std::is_same_v<IVT, IntType>) lua_pushnumber(L, iv);
+									else if constexpr (std::is_same_v<IVT, DoubleType>) lua_pushnumber(L, iv);
+									else lua_pushnil(L);
+								}, inner);
+								lua_setfield(L, -2, mk.c_str());
+							}
+						}
+					}, var);
+					lua_rawseti(L, -2, static_cast<lua_Integer>(i + 1));
+				}
+			} else if constexpr (std::is_same_v<T, MapType>) {
+				lua_newtable(L);
+				for (const auto &[key, val] : arg) {
+					const auto &subVal = *val;
+					auto var = subVal.getVariant();
+					std::visit([L](const auto &v) {
+						using VT = std::decay_t<decltype(v)>;
+						if constexpr (std::is_same_v<VT, StringType>) {
+							Lua::pushString(L, v);
+						} else if constexpr (std::is_same_v<VT, BooleanType>) {
+							Lua::pushBoolean(L, v);
+						} else if constexpr (std::is_same_v<VT, IntType>) {
+							lua_pushnumber(L, v);
+						} else if constexpr (std::is_same_v<VT, DoubleType>) {
+							lua_pushnumber(L, v);
+						} else if constexpr (std::is_same_v<VT, ArrayType>) {
+							lua_newtable(L);
+							for (size_t j = 0; j < v.size(); ++j) {
+								pushValueWrapper(L, v[j], true);
+								lua_rawseti(L, -2, static_cast<lua_Integer>(j + 1));
+							}
+						} else if constexpr (std::is_same_v<VT, MapType>) {
+							lua_newtable(L);
+							for (const auto &[mk, mv] : v) {
+								pushValueWrapper(L, *mv, true);
+								lua_setfield(L, -2, mk.c_str());
+							}
+						}
+					}, var);
+					lua_setfield(L, -2, key.c_str());
+				}
+			}
+		}, val.getVariant());
+	} else {
+		lua_pushnil(L);
+	}
+	return 1;
+}
+
+int LuaScriptInterface::luaKVRemove(lua_State* L) {
+	// kv.remove(key) or scopedKV:remove(key)
+	const auto key = Lua::getString(L, -1);
+	if (Lua::isUserdata(L, 1)) {
+		auto* ptr = static_cast<std::shared_ptr<KV>*>(luaL_testudata(L, 1, "KV"));
+		if (!ptr) {
+			luaL_error(L, "KV:remove called on non-KV userdata");
+		}
+		(*ptr)->remove(key);
+	} else {
+		KVStore::getInstance().remove(key);
+	}
+	lua_pushnil(L);
+	return 1;
+}
+
+int LuaScriptInterface::luaKVKeys(lua_State* L) {
+	// kv.keys([prefix]) or scopedKV:keys([prefix])
+	std::unordered_set<std::string> keys;
+	std::string prefix;
+
+	if (Lua::isString(L, -1)) {
+		prefix = Lua::getString(L, -1);
+	}
+
+	if (Lua::isUserdata(L, 1)) {
+		auto* ptr = static_cast<std::shared_ptr<KV>*>(luaL_testudata(L, 1, "KV"));
+		if (!ptr) {
+			luaL_error(L, "KV:keys called on non-KV userdata");
+		}
+		keys = (*ptr)->keys(prefix);
+	} else {
+		keys = KVStore::getInstance().keys(prefix);
+	}
+
+	int index = 0;
+	lua_createtable(L, static_cast<int>(keys.size()), 0);
+	for (const auto &key : keys) {
+		Lua::pushString(L, key);
+		lua_rawseti(L, -2, ++index);
+	}
+	return 1;
+}
+
+int LuaScriptInterface::luaKVGC(lua_State* L) {
+	auto* ptr = static_cast<std::shared_ptr<KV>*>(luaL_testudata(L, 1, "KV"));
+	if (ptr) {
+		ptr->reset();
+	}
+	return 0;
 }
