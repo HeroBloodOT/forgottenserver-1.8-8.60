@@ -604,7 +604,7 @@ bool ConfigManager::load()
 	// AutoLoot Config
 	booleans[Boolean::AUTOLOOT_ENABLED] = getGlobalBoolean(L, "Autoloot_enabled", true);
 	strings[String::AUTOLOOT_BLOCKIDS] = getGlobalString(L, "AutoLoot_BlockIDs", "");
-	strings[String::AUTOLOOT_MONEYIDS] = getGlobalString(L, "AutoLoot_MoneyIDs", "2148;2152;2160");
+	strings[String::AUTOLOOT_MONEYIDS] = getGlobalString(L, "AutoLoot_MoneyIDs", "3031;3035;3043;32724");
 	integers[Integer::AUTOLOOT_MAXITEMS_FREE] = getGlobalInteger(L, "AutoLoot_MaxItemFree", 5);
 	integers[Integer::AUTOLOOT_MAXITEMS_PREMIUM] = getGlobalInteger(L, "AutoLoot_MaxItemPremium", 10);
 

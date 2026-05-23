@@ -5850,14 +5850,29 @@ void Player::lootCorpse(Container* container)
 		return;
 	}
 
-	if (!findGoldPouch()) {
-		sendTextMessage(MESSAGE_EVENT_ORANGE, "You need a Gold Pouch to use AutoLoot.");
-		return;
+	std::string moneyConfig = std::string(ConfigManager::getString(ConfigManager::AUTOLOOT_MONEYIDS));
+	std::vector<std::string_view> moneyIdStrings = explodeString(moneyConfig, ";");
+	std::set<uint16_t> moneyIds;
+	for (const auto& str : moneyIdStrings) {
+		if (str.empty()) continue;
+		try {
+			moneyIds.insert(static_cast<uint16_t>(std::stoi(std::string(str))));
+		} catch (...) {
+			continue;
+		}
 	}
 
 	auto goldPouchDestination = findGoldPouch();
-	auto storeInboxDestination = getStoreInbox();
-	if (!storeInboxDestination) {
+	if (!goldPouchDestination && !autolootConfig.goldEnabled) {
+		sendTextMessage(MESSAGE_EVENT_ORANGE, "You need a Gold Pouch to use AutoLoot items.");
+		return;
+	}
+
+	Container* storeInboxDestination = nullptr;
+	if (goldPouchDestination) {
+		storeInboxDestination = getStoreInbox();
+	}
+	if (goldPouchDestination && !storeInboxDestination) {
 		sendTextMessage(MESSAGE_EVENT_ORANGE, "Your store inbox is unavailable.");
 		return;
 	}
@@ -5877,41 +5892,25 @@ void Player::lootCorpse(Container* container)
 		}
 	}
 
-	std::string moneyConfig = std::string(ConfigManager::getString(ConfigManager::AUTOLOOT_MONEYIDS));
-	std::vector<std::string_view> moneyIdStrings = explodeString(moneyConfig, ";");
-	std::set<uint16_t> moneyIds;
-	for (const auto& str : moneyIdStrings) {
-		if (str.empty()) continue;
-		try {
-			moneyIds.insert(static_cast<uint16_t>(std::stoi(std::string(str))));
-		} catch (...) {
-			continue;
-		}
-	}
-
-	uint64_t totalDepositValue = 0;
-	std::vector<Item*> itemsToRemove;
+	std::vector<std::pair<Item*, uint64_t>> moneyItemsToDeposit;
+	std::unordered_set<Item*> queuedMoneyItems;
 
 	for (const auto& pair : toMove) {
 		Item* item = pair.first;
 		uint16_t itemId = item->getID();
-		uint32_t value = 0;
+		uint64_t value = 0;
 
 		if (moneyIds.contains(itemId)) {
-			if (itemId == 2160) {
-				value = item->getItemCount() * 10000;
-			} else if (itemId == 2152) {
-				value = item->getItemCount() * 100;
-			} else if (itemId == 2148) {
-				value = item->getItemCount();
-			} else {
-				value = item->getWorth();
-			}
+			value = item->getWorth();
 		}
 
 		if (value > 0) {
-			totalDepositValue += value;
-			itemsToRemove.push_back(item);
+			moneyItemsToDeposit.emplace_back(item, value);
+			queuedMoneyItems.insert(item);
+			continue;
+		}
+
+		if (!goldPouchDestination) {
 			continue;
 		}
 
@@ -5961,23 +5960,25 @@ void Player::lootCorpse(Container* container)
 	}
 
 	if (autolootConfig.goldEnabled) {
-		std::unordered_set<Item*> alreadyQueued(itemsToRemove.begin(), itemsToRemove.end());
 		for (ContainerIterator it = container->iterator(); it.hasNext(); it.advance()) {
 			Item* goldItem = *it;
 			uint64_t worth = static_cast<uint64_t>(goldItem->getWorth());
-			if (worth > 0 && !alreadyQueued.contains(goldItem)) {
-				totalDepositValue += worth;
-				itemsToRemove.push_back(goldItem);
-				alreadyQueued.insert(goldItem);
+			if (worth > 0 && !queuedMoneyItems.contains(goldItem)) {
+				moneyItemsToDeposit.emplace_back(goldItem, worth);
+				queuedMoneyItems.insert(goldItem);
 			}
+		}
+	}
+
+	uint64_t totalDepositValue = 0;
+	for (const auto& [item, value] : moneyItemsToDeposit) {
+		if (g_game.internalRemoveItem(item, item->getItemCount()) == RETURNVALUE_NOERROR) {
+			totalDepositValue += value;
 		}
 	}
 
 	if (totalDepositValue > 0) {
 		setBankBalance(bankBalance + totalDepositValue);
-		for (Item* item : itemsToRemove) {
-			g_game.internalRemoveItem(item, item->getItemCount());
-		}
 		sendTextMessage(MESSAGE_STATUS_CONSOLE_BLUE, fmt::format("AutoLoot: Deposited {:d} gold to your bank account.", totalDepositValue));
 	}
 }
