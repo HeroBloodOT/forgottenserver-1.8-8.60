@@ -5863,15 +5863,7 @@ void Player::lootCorpse(Container* container)
 	}
 
 	auto goldPouchDestination = findGoldPouch();
-	if (!goldPouchDestination && !autolootConfig.goldEnabled) {
-		sendTextMessage(MESSAGE_EVENT_ORANGE, "You need a Gold Pouch to use AutoLoot items.");
-		return;
-	}
-
-	Container* storeInboxDestination = nullptr;
-	if (goldPouchDestination) {
-		storeInboxDestination = getStoreInbox();
-	}
+	auto storeInboxDestination = getStoreInbox();
 	if (goldPouchDestination && !storeInboxDestination) {
 		sendTextMessage(MESSAGE_EVENT_ORANGE, "Your store inbox is unavailable.");
 		return;
@@ -5892,13 +5884,27 @@ void Player::lootCorpse(Container* container)
 		}
 	}
 
+	bool needsGoldPouch = false;
+	for (const auto& pair : toMove) {
+		Item* item = pair.first;
+		const uint16_t itemId = item->getID();
+		if (!moneyIds.contains(itemId) || item->getWorth() == 0) {
+			needsGoldPouch = true;
+			break;
+		}
+	}
+
+	if (!goldPouchDestination && needsGoldPouch) {
+		sendTextMessage(MESSAGE_EVENT_ORANGE, "You need a Gold Pouch to use AutoLoot.");
+	}
+
 	std::vector<std::pair<Item*, uint64_t>> moneyItemsToDeposit;
 	std::unordered_set<Item*> queuedMoneyItems;
 
 	for (const auto& pair : toMove) {
 		Item* item = pair.first;
 		uint16_t itemId = item->getID();
-		uint64_t value = 0;
+		uint32_t value = 0;
 
 		if (moneyIds.contains(itemId)) {
 			value = item->getWorth();

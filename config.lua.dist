@@ -14,7 +14,7 @@ dllCheckKickTime = 5 -- time in seconds (optional usage)
 
 Autoloot_enabled = true
 AutoLoot_BlockIDs = ""
-AutoLoot_MoneyIDs = "3031;3035;3043;9058"
+AutoLoot_MoneyIDs = "3031;3035;3043;32724"
 AutoLoot_MaxItemFree = 5
 AutoLoot_MaxItemPremium = 10
 
