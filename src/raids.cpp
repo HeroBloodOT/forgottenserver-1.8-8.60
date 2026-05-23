@@ -13,39 +13,61 @@
 #include "logger.h"
 #include <fmt/format.h>
 
-#include <filesystem>
-
 extern Game g_game;
 
 namespace {
 
-std::string getRaidSpawnFilePath(std::string_view spawnFile)
+bool isValidRaidSpawnFile(std::string_view file)
 {
-	if (spawnFile.empty()) {
-		return {};
+	if (file.empty()) {
+		return true;
 	}
 
-	std::filesystem::path relativePath{std::string{spawnFile}};
-	if (relativePath.empty() || relativePath.is_absolute()) {
-		return {};
-	}
-
-	for (const auto& part : relativePath) {
-		if (part == "..") {
-			return {};
-		}
-	}
-
-	if (!relativePath.has_extension()) {
-		relativePath += ".xml";
-	}
-
-	return (std::filesystem::path{"data/raids"} / relativePath).generic_string();
+	std::filesystem::path path(file);
+	return !path.has_root_path() && !path.has_parent_path() && path.filename() == path;
 }
 
-int32_t getRaidSpawnFileSpawntime()
+std::filesystem::path getRaidSpawnFileDirectory()
 {
-	return std::max<int64_t>(10, getInteger(ConfigManager::RAID_SPAWN_FILE_SPAWNTIME));
+	std::string directory{ConfigManager::getString(ConfigManager::RAID_SPAWNFILE_DIRECTORY)};
+	if (directory.empty()) {
+		directory = "data/raids";
+	}
+	return directory;
+}
+
+struct RaidSpawnFileGroup
+{
+	Position center;
+	std::vector<const RaidSpawnRecord*> records;
+};
+
+bool isInRaidSpawnFileGroup(const RaidSpawnFileGroup& group, const Position& position, int32_t radius)
+{
+	return group.center.z == position.z && std::abs(position.getX() - group.center.getX()) <= radius &&
+	       std::abs(position.getY() - group.center.getY()) <= radius;
+}
+
+std::vector<RaidSpawnFileGroup> groupRaidSpawnRecords(const std::vector<RaidSpawnRecord>& records, int32_t radius)
+{
+	std::vector<RaidSpawnFileGroup> groups;
+
+	for (const RaidSpawnRecord& record : records) {
+		auto it = std::ranges::find_if(groups, [&record, radius](const RaidSpawnFileGroup& group) {
+			return isInRaidSpawnFileGroup(group, record.position, radius);
+		});
+
+		if (it != groups.end()) {
+			it->records.push_back(&record);
+			continue;
+		}
+
+		RaidSpawnFileGroup& group = groups.emplace_back();
+		group.center = record.position;
+		group.records.push_back(&record);
+	}
+
+	return groups;
 }
 
 } // namespace
@@ -106,15 +128,15 @@ bool Raids::loadFromXml()
 			repeat = false;
 		}
 
-		if ((attr = raidNode.attribute("spawnFile")) && getBoolean(ConfigManager::RAID_SPAWN_FILE_ENABLED)) {
-			spawnFile = getRaidSpawnFilePath(attr.as_string());
-			if (spawnFile.empty()) {
-				LOG_ERROR(fmt::format("[Error - Raids::loadFromXml] Invalid spawnFile path for raid: {}", name));
+		if ((attr = raidNode.attribute("spawnFile"))) {
+			spawnFile = attr.as_string();
+			if (!isValidRaidSpawnFile(spawnFile)) {
+				LOG_ERROR(fmt::format("[Error - Raids::loadFromXml] Invalid spawnFile tag for raid {}: {}", name, spawnFile));
 				continue;
 			}
 		}
 
-		auto newRaid = std::make_unique<Raid>(name, interval, margin, repeat, std::move(spawnFile));
+		auto newRaid = std::make_shared<Raid>(name, interval, margin, repeat, spawnFile);
 		if (newRaid->loadFromXml("data/raids/" + file)) {
 			raidList.push_back(std::move(newRaid));
 		} else {
@@ -162,8 +184,6 @@ void Raids::shutdown()
         running->stopEvents();
         running = nullptr;
     }
-
-	runningNonRepeatRaid.reset();
     
     // Clear the raid list.
     raidList.clear();
@@ -173,13 +193,15 @@ void Raids::shutdown()
 
 void Raids::checkRaids()
 {
-	clearCompletedRunningRaid();
-
 	if (!getRunning()) {
 		uint64_t now = OTSYS_TIME();
 
 		auto it = std::find_if(raidList.begin(), raidList.end(), [this, now](const auto& raidPtr) {
 			Raid* raid = raidPtr.get();
+			if (!raid->canBeRepeated() && raid->hasExecuted()) {
+				return false;
+			}
+
 			if (now >= (getLastRaidEnd() + raid->getMargin())) {
 				if (((MAX_RAND_RANGE * CHECK_RAIDS_INTERVAL) / raid->getInterval()) >=
 				    static_cast<uint32_t>(uniform_random(0, MAX_RAND_RANGE))) {
@@ -191,14 +213,8 @@ void Raids::checkRaids()
 
 		if (it != raidList.end()) {
 			Raid* raid = it->get();
-			if (!raid->canBeRepeated()) {
-				runningNonRepeatRaid = std::move(*it);
-				raidList.erase(it);
-				raid = runningNonRepeatRaid.get();
-			}
-
 			setRunning(raid);
-			raid->startRaid();
+			raid->startRaid(!raid->canBeRepeated());
 		}
 	}
 
@@ -217,11 +233,6 @@ void Raids::clear()
 	g_scheduler.stopEvent(checkRaidsEvent);
 	checkRaidsEvent = 0;
 
-	if (runningNonRepeatRaid) {
-		runningNonRepeatRaid->stopEvents();
-		runningNonRepeatRaid.reset();
-	}
-
 	for (const auto& raid : raidList) {
 		raid->stopEvents();
 	}
@@ -233,13 +244,6 @@ void Raids::clear()
 	lastRaidEnd = 0;
 
 	scriptInterface.reInitState();
-}
-
-void Raids::clearCompletedRunningRaid()
-{
-	if (!running && runningNonRepeatRaid) {
-		runningNonRepeatRaid.reset();
-	}
 }
 
 bool Raids::reload()
@@ -288,6 +292,7 @@ bool Raid::loadFromXml(const std::string& filename)
 		}
 
 		if (event->configureRaidEvent(eventNode)) {
+			event->setRaid(this);
 			raidEvents.push_back(std::move(event));
 		} else {
 			LOG_ERROR(fmt::format("[Error - Raid::loadFromXml] In file ({}), eventNode: {}", filename, eventNode.name()));
@@ -302,16 +307,20 @@ bool Raid::loadFromXml(const std::string& filename)
 	return true;
 }
 
-void Raid::startRaid()
+void Raid::startRaid(bool markExecutedAfterExecution)
 {
-	spawnFileEntries.clear();
-	spawnFileRecording = !spawnFile.empty() && getBoolean(ConfigManager::RAID_SPAWN_FILE_ENABLED);
+	this->markExecutedAfterExecution = markExecutedAfterExecution;
+	spawnRecords.clear();
 
 	RaidEvent* raidEvent = getNextRaidEvent();
 	if (raidEvent) {
 		state = RAIDSTATE_EXECUTING;
-		nextEventEvent = g_scheduler.addEvent(
-		    createSchedulerTask(raidEvent->getDelay(), ([this, raidEvent]() { executeRaidEvent(raidEvent); })));
+		std::weak_ptr<Raid> weakRaid = weak_from_this();
+		nextEventEvent = g_scheduler.addEvent(createSchedulerTask(raidEvent->getDelay(), ([weakRaid, raidEvent]() {
+			if (std::shared_ptr<Raid> raid = weakRaid.lock()) {
+				raid->executeRaidEvent(raidEvent);
+			}
+		})));
 	} else {
 		resetRaid();
 	}
@@ -319,8 +328,6 @@ void Raid::startRaid()
 
 void Raid::executeRaidEvent(RaidEvent* raidEvent)
 {
-	nextEventEvent = 0;
-
 	if (raidEvent->executeEvent()) {
 		nextEvent++;
 		RaidEvent* newRaidEvent = getNextRaidEvent();
@@ -328,8 +335,12 @@ void Raid::executeRaidEvent(RaidEvent* raidEvent)
 		if (newRaidEvent) {
 			uint32_t ticks = static_cast<uint32_t>(
 			    std::max<int32_t>(RAID_MINTICKS, newRaidEvent->getDelay() - raidEvent->getDelay()));
-			nextEventEvent =
-			    g_scheduler.addEvent(createSchedulerTask(ticks, ([this, newRaidEvent]() { executeRaidEvent(newRaidEvent); })));
+			std::weak_ptr<Raid> weakRaid = weak_from_this();
+			nextEventEvent = g_scheduler.addEvent(createSchedulerTask(ticks, ([weakRaid, newRaidEvent]() {
+				if (std::shared_ptr<Raid> raid = weakRaid.lock()) {
+					raid->executeRaidEvent(newRaidEvent);
+				}
+			})));
 		} else {
 			resetRaid();
 		}
@@ -340,12 +351,20 @@ void Raid::executeRaidEvent(RaidEvent* raidEvent)
 
 void Raid::resetRaid()
 {
-	flushSpawnFile();
+	saveSpawnFile();
+	spawnRecords.clear();
+
+	const bool markExecutedAfterReset = markExecutedAfterExecution;
 	nextEvent = 0;
-	state = RAIDSTATE_IDLE;
 	nextEventEvent = 0;
+	markExecutedAfterExecution = false;
+	state = RAIDSTATE_IDLE;
 	g_game.raids.setRunning(nullptr);
 	g_game.raids.setLastRaidEnd(OTSYS_TIME());
+
+	if (markExecutedAfterReset) {
+		executed = true;
+	}
 }
 
 void Raid::stopEvents()
@@ -354,7 +373,6 @@ void Raid::stopEvents()
 		g_scheduler.stopEvent(nextEventEvent);
 		nextEventEvent = 0;
 	}
-	flushSpawnFile();
 }
 
 RaidEvent* Raid::getNextRaidEvent()
@@ -365,112 +383,65 @@ RaidEvent* Raid::getNextRaidEvent()
 	return nullptr;
 }
 
-void Raid::recordSpawnFileMonster(std::string_view monsterName, const Position& position, Direction direction)
+void Raid::recordSpawn(std::string_view monsterName, const Position& position)
 {
-	if (!spawnFileRecording || spawnFile.empty() || !getBoolean(ConfigManager::RAID_SPAWN_FILE_ENABLED)) {
+	if (spawnFile.empty() || !ConfigManager::getBoolean(ConfigManager::RAID_SPAWN_FILE_ENABLED)) {
 		return;
 	}
 
-	spawnFileEntries.emplace_back(monsterName, position, direction);
+	spawnRecords.emplace_back(monsterName, position);
 }
 
-void Raid::flushSpawnFile()
+bool Raid::saveSpawnFile() const
 {
-	if (!spawnFileRecording) {
-		return;
-	}
-
-	spawnFileRecording = false;
-	if (spawnFile.empty() || !getBoolean(ConfigManager::RAID_SPAWN_FILE_ENABLED)) {
-		spawnFileEntries.clear();
-		return;
+	if (spawnFile.empty() || !ConfigManager::getBoolean(ConfigManager::RAID_SPAWN_FILE_ENABLED)) {
+		return true;
 	}
 
 	pugi::xml_document doc;
-	auto declaration = doc.prepend_child(pugi::node_declaration);
+	pugi::xml_node declaration = doc.append_child(pugi::node_declaration);
 	declaration.append_attribute("version") = "1.0";
 
-	auto spawnsNode = doc.append_child("spawns");
-	struct SpawnGroup
-	{
-		Position center;
-		std::vector<const RaidSpawnFileEntry*> entries;
-	};
+	const int32_t spawnRadius = static_cast<int32_t>(std::max<int64_t>(0, ConfigManager::getInteger(ConfigManager::RAID_SPAWN_FILE_RADIUS)));
+	const int64_t spawnTime = std::max<int64_t>(0, ConfigManager::getInteger(ConfigManager::RAID_SPAWN_FILE_SPAWNTIME));
+	const int64_t direction = std::clamp<int64_t>(ConfigManager::getInteger(ConfigManager::RAID_SPAWN_FILE_DIRECTION), 0, 3);
+	const std::vector<RaidSpawnFileGroup> groups = groupRaidSpawnRecords(spawnRecords, spawnRadius);
 
-	std::vector<SpawnGroup> groups;
-	for (const RaidSpawnFileEntry& entry : spawnFileEntries) {
-		auto groupIt = std::find_if(groups.begin(), groups.end(), [&entry](const SpawnGroup& group) {
-			return group.center.z == entry.position.z &&
-			       std::abs(static_cast<int32_t>(group.center.x) - static_cast<int32_t>(entry.position.x)) <= 1 &&
-			       std::abs(static_cast<int32_t>(group.center.y) - static_cast<int32_t>(entry.position.y)) <= 1;
-		});
-
-		if (groupIt == groups.end()) {
-			SpawnGroup group;
-			group.center = entry.position;
-			group.entries.push_back(&entry);
-			groups.push_back(std::move(group));
-		} else {
-			groupIt->entries.push_back(&entry);
-		}
-	}
-
-	const int32_t spawntime = getRaidSpawnFileSpawntime();
-	const bool includeDirection = getBoolean(ConfigManager::RAID_SPAWN_FILE_INCLUDE_DIRECTION);
-	for (const SpawnGroup& group : groups) {
-		auto spawnNode = spawnsNode.append_child("spawn");
+	pugi::xml_node spawnsNode = doc.append_child("spawns");
+	for (const RaidSpawnFileGroup& group : groups) {
+		pugi::xml_node spawnNode = spawnsNode.append_child("spawn");
 		spawnNode.append_attribute("centerx") = group.center.x;
 		spawnNode.append_attribute("centery") = group.center.y;
-		spawnNode.append_attribute("centerz") = group.center.z;
-		spawnNode.append_attribute("radius") = 1;
+		spawnNode.append_attribute("centerz") = static_cast<unsigned int>(group.center.z);
+		spawnNode.append_attribute("radius") = spawnRadius;
 
-		for (const RaidSpawnFileEntry* entry : group.entries) {
-			auto monsterNode = spawnNode.append_child("monster");
-			monsterNode.append_attribute("name") = entry->monsterName.c_str();
-			monsterNode.append_attribute("x") =
-			    static_cast<int32_t>(entry->position.x) - static_cast<int32_t>(group.center.x);
-			monsterNode.append_attribute("y") =
-			    static_cast<int32_t>(entry->position.y) - static_cast<int32_t>(group.center.y);
-			monsterNode.append_attribute("z") = entry->position.z;
-			monsterNode.append_attribute("spawntime") = spawntime;
-			if (includeDirection) {
-				monsterNode.append_attribute("direction") = static_cast<uint16_t>(entry->direction);
-			}
+		for (const RaidSpawnRecord* record : group.records) {
+			pugi::xml_node monsterNode = spawnNode.append_child("monster");
+			monsterNode.append_attribute("name") = record->monsterName.c_str();
+			monsterNode.append_attribute("x") = record->position.getX() - group.center.getX();
+			monsterNode.append_attribute("y") = record->position.getY() - group.center.getY();
+			monsterNode.append_attribute("z") = static_cast<unsigned int>(record->position.z);
+			monsterNode.append_attribute("spawntime") = spawnTime;
+			monsterNode.append_attribute("direction") = direction;
 		}
 	}
 
-	std::filesystem::path targetPath{spawnFile};
-	std::error_code error;
-	if (targetPath.has_parent_path()) {
-		std::filesystem::create_directories(targetPath.parent_path(), error);
-		if (error) {
-			LOG_ERROR(fmt::format("[Error - Raid::flushSpawnFile] Failed to create directory for {}: {}", spawnFile, error.message()));
-			spawnFileEntries.clear();
-			return;
-		}
+	const std::filesystem::path directory = getRaidSpawnFileDirectory();
+	std::error_code errorCode;
+	std::filesystem::create_directories(directory, errorCode);
+	if (errorCode) {
+		LOG_ERROR(fmt::format("[Error - Raid::saveSpawnFile] Failed to create raid spawn directory: {} ({})", directory.string(), errorCode.message()));
+		return false;
 	}
 
-	std::filesystem::path tempPath = targetPath;
-	tempPath += ".tmp";
-	if (!doc.save_file(tempPath.string().c_str(), "\t", pugi::format_default, pugi::encoding_utf8)) {
-		LOG_ERROR(fmt::format("[Error - Raid::flushSpawnFile] Failed to save raid spawn file: {}", tempPath.generic_string()));
-		spawnFileEntries.clear();
-		return;
+	const std::filesystem::path filePath = directory / spawnFile;
+	if (!doc.save_file(filePath.string().c_str(), "\t", pugi::format_default, pugi::encoding_utf8)) {
+		LOG_ERROR(fmt::format("[Error - Raid::saveSpawnFile] Failed to save raid spawn file: {}", filePath.string()));
+		return false;
 	}
 
-	std::filesystem::remove(targetPath, error);
-	error.clear();
-	std::filesystem::rename(tempPath, targetPath, error);
-	if (error) {
-		LOG_ERROR(fmt::format("[Error - Raid::flushSpawnFile] Failed to replace raid spawn file {}: {}", spawnFile, error.message()));
-		error.clear();
-		std::filesystem::remove(tempPath, error);
-		spawnFileEntries.clear();
-		return;
-	}
-
-	LOG_INFO(fmt::format("[Raid] Wrote {} successful spawn(s) to {}", spawnFileEntries.size(), spawnFile));
-	spawnFileEntries.clear();
+	LOG_INFO(fmt::format("[Raid] Saved {} generated monsters in {} spawn blocks to {}", spawnRecords.size(), groups.size(), filePath.string()));
+	return true;
 }
 
 bool RaidEvent::configureRaidEvent(const pugi::xml_node& eventNode)
@@ -582,8 +553,8 @@ bool SingleSpawnEvent::executeEvent()
 		return false;
 	}
 
-	if (Raid* raid = g_game.raids.getRunning()) {
-		raid->recordSpawnFileMonster(monsterName, monster->getPosition(), monster->getDirection());
+	if (Raid* raid = getRaid()) {
+		raid->recordSpawn(monsterName, position);
 	}
 	return true;
 }
@@ -714,7 +685,6 @@ bool AreaSpawnEvent::executeEvent()
 {
 	for (const MonsterSpawn& spawn : spawnList) {
 		uint32_t amount = uniform_random(spawn.minAmount, spawn.maxAmount);
-		uint32_t placed = 0;
 		for (uint32_t i = 0; i < amount; ++i) {
 			auto monsterUnique = Monster::createMonster(spawn.name);
 			if (!monsterUnique) {
@@ -723,6 +693,7 @@ bool AreaSpawnEvent::executeEvent()
 			}
 
 			std::shared_ptr<Monster> monster(std::move(monsterUnique));
+			bool placed = false;
 			for (int32_t tries = 0; tries < MAXIMUM_TRIES_PER_MONSTER; tries++) {
 				Tile* tile = g_game.map.getTile(static_cast<uint16_t>(uniform_random(fromPos.x, toPos.x)),
 				                                static_cast<uint16_t>(uniform_random(fromPos.y, toPos.y)),
@@ -730,17 +701,17 @@ bool AreaSpawnEvent::executeEvent()
 				if (tile && !tile->isMoveableBlocking() && !tile->hasFlag(TILESTATE_PROTECTIONZONE) &&
 				    tile->getTopCreature() == nullptr &&
 				    g_game.placeCreature(monster.get(), tile->getPosition(), false, true)) {
-					++placed;
-					if (Raid* raid = g_game.raids.getRunning()) {
-						raid->recordSpawnFileMonster(spawn.name, monster->getPosition(), monster->getDirection());
+					if (Raid* raid = getRaid()) {
+						raid->recordSpawn(spawn.name, tile->getPosition());
 					}
+					placed = true;
 					break;
 				}
 			}
-		}
 
-		if (placed < amount) {
-			LOG_WARN(fmt::format("[Warning - AreaSpawnEvent::executeEvent] Placed {}/{} monster(s) for {}.", placed, amount, spawn.name));
+			if (!placed) {
+				LOG_WARN(fmt::format("[Warning - AreaSpawnEvent::executeEvent] Could not place monster {} after {} tries", spawn.name, MAXIMUM_TRIES_PER_MONSTER));
+			}
 		}
 	}
 	return true;

@@ -25,15 +25,14 @@ struct MonsterSpawn
 	uint32_t maxAmount;
 };
 
-struct RaidSpawnFileEntry
+struct RaidSpawnRecord
 {
-	RaidSpawnFileEntry(std::string_view monsterName, const Position& position, Direction direction) :
-	    monsterName{monsterName}, position{position}, direction{direction}
+	RaidSpawnRecord(std::string_view monsterName, const Position& position) :
+	    monsterName{monsterName}, position{position}
 	{}
 
 	std::string monsterName;
 	Position position;
-	Direction direction;
 };
 
 // How many times it will try to find a tile to add the monster to before giving up
@@ -77,12 +76,9 @@ public:
 	LuaScriptInterface& getScriptInterface() { return scriptInterface; }
 
 private:
-	void clearCompletedRunningRaid();
-
 	LuaScriptInterface scriptInterface{"Raid Interface"};
 
-	std::list<std::unique_ptr<Raid>> raidList;
-	std::unique_ptr<Raid> runningNonRepeatRaid;
+	std::list<std::shared_ptr<Raid>> raidList;
 	Raid* running = nullptr; // non-owning
 	uint64_t lastRaidEnd = 0;
 	uint32_t checkRaidsEvent = 0;
@@ -90,11 +86,11 @@ private:
 	bool started = false;
 };
 
-class Raid
+class Raid : public std::enable_shared_from_this<Raid>
 {
 public:
-	Raid(std::string_view name, uint32_t interval, uint32_t marginTime, bool repeat, std::string spawnFile) :
-	    name{name}, spawnFile{std::move(spawnFile)}, interval{interval}, margin{marginTime}, repeat{repeat}
+	Raid(std::string_view name, uint32_t interval, uint32_t marginTime, bool repeat, std::string_view spawnFile) :
+	    name{name}, spawnFile{spawnFile}, interval{interval}, margin{marginTime}, repeat{repeat}
 	{}
 	~Raid();
 
@@ -104,7 +100,7 @@ public:
 
 	bool loadFromXml(const std::string& filename);
 
-	void startRaid();
+	void startRaid(bool markExecutedAfterExecution = false);
 
 	void executeRaidEvent(RaidEvent* raidEvent);
 	void resetRaid();
@@ -112,20 +108,22 @@ public:
 	RaidEvent* getNextRaidEvent();
 	void setState(RaidState_t newState) { state = newState; }
 	const std::string& getName() const { return name; }
-	const std::string& getSpawnFile() const { return spawnFile; }
 
 	bool isLoaded() const { return loaded; }
 	uint64_t getMargin() const { return margin; }
 	uint32_t getInterval() const { return interval; }
 	bool canBeRepeated() const { return repeat; }
+	bool hasExecuted() const { return executed; }
 
-	void recordSpawnFileMonster(std::string_view monsterName, const Position& position, Direction direction);
-	void flushSpawnFile();
+	void recordSpawn(std::string_view monsterName, const Position& position);
+
 	void stopEvents();
 
 private:
+	bool saveSpawnFile() const;
+
 	std::vector<std::unique_ptr<RaidEvent>> raidEvents;
-	std::vector<RaidSpawnFileEntry> spawnFileEntries;
+	std::vector<RaidSpawnRecord> spawnRecords;
 	std::string name;
 	std::string spawnFile;
 	uint32_t interval;
@@ -135,7 +133,8 @@ private:
 	uint32_t nextEventEvent = 0;
 	bool loaded = false;
 	bool repeat;
-	bool spawnFileRecording = false;
+	bool executed = false;
+	bool markExecutedAfterExecution = false;
 };
 
 class RaidEvent
@@ -148,7 +147,11 @@ public:
 	virtual bool executeEvent() = 0;
 	uint32_t getDelay() const { return delay; }
 
+	void setRaid(Raid* newRaid) { raid = newRaid; }
+	Raid* getRaid() const { return raid; }
+
 private:
+	Raid* raid = nullptr; // non-owning
 	uint32_t delay;
 };
 
