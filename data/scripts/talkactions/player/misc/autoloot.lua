@@ -94,10 +94,14 @@ function talkaction.onSay(player, words, param)
 		goldStatus = "On"
 	end
 
+	local autoBankEnabled = configKeys.AUTOLOOT_AUTO_BANK and configManager.getBoolean(configKeys.AUTOLOOT_AUTO_BANK)
+	local autoMoneyMode = autoBankEnabled and "Bank" or "Pocket"
+	local moneyDestination = autoBankEnabled and "bank" or "pocket"
+
 	local text = "_________AutoLoot System_________\n\n" ..
 	             "AutoLoot Status: " .. status .. "\n" ..
-	             "AutoMoney Mode: Bank\n" ..
-	             "AutoLoot Gold (coins -> bank): " .. goldStatus .. "\n\n" ..
+	             "AutoMoney Mode: " .. autoMoneyMode .. "\n" ..
+	             "AutoLoot Gold (coins -> " .. moneyDestination .. "): " .. goldStatus .. "\n\n" ..
 	             "Commands:\n" ..
 	             "!autoloot on/off\n" ..
 	             "!autoloot gold  (toggle coin collection)\n" ..

@@ -5891,17 +5891,6 @@ void Player::lootCorpse(Container* container)
 	std::unordered_set<Item*> queuedMoneyItems;
 	bool missingGoldPouchMessageSent = false;
 
-	auto canUseAutoBank = [&]() {
-		if (autolootGoldPouchEnabled && !goldPouchDestination) {
-			if (!missingGoldPouchMessageSent) {
-				sendTextMessage(MESSAGE_EVENT_ORANGE, "You need a Gold Pouch to use AutoLoot.");
-				missingGoldPouchMessageSent = true;
-			}
-			return false;
-		}
-		return true;
-	};
-
 	auto moveAutolootItem = [&](Item* item) {
 		ReturnValue ret;
 		Cylinder* primaryDestination = nullptr;
@@ -5973,14 +5962,15 @@ void Player::lootCorpse(Container* container)
 		Item* item = pair.first;
 		const uint16_t itemId = item->getID();
 		const uint64_t value = static_cast<uint64_t>(item->getWorth());
-		const bool isMoneyItem = autolootConfig.goldEnabled && moneyIds.contains(itemId) && value > 0;
+		const bool isMoneyItem = moneyIds.contains(itemId) && value > 0;
 
 		if (isMoneyItem) {
 			queuedMoneyItems.insert(item);
+			if (!autolootConfig.goldEnabled) {
+				continue;
+			}
 			if (autobankEnabled) {
-				if (canUseAutoBank()) {
-					moneyItemsToDeposit.emplace_back(item, value);
-				}
+				moneyItemsToDeposit.emplace_back(item, value);
 				continue;
 			}
 		}
@@ -5997,9 +5987,7 @@ void Player::lootCorpse(Container* container)
 			if (moneyIds.contains(itemId) && worth > 0 && !queuedMoneyItems.contains(goldItem)) {
 				queuedMoneyItems.insert(goldItem);
 				if (autobankEnabled) {
-					if (canUseAutoBank()) {
-						moneyItemsToDeposit.emplace_back(goldItem, worth);
-					}
+					moneyItemsToDeposit.emplace_back(goldItem, worth);
 				} else {
 					moneyItemsToMove.push_back(goldItem);
 				}
