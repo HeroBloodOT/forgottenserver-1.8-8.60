@@ -978,8 +978,6 @@ void ProtocolGame::parsePacket(NetworkMessage& msg)
 			break;
 		case 0x8F:
 			if (shouldSendQuickLootFlags()) {
-				parseQuickLoot(msg);
-			} else {
 				g_dispatcher.addTask([=, playerID = player->getID(), message = std::make_shared<NetworkMessage>(msg)]() {
 					g_game.parsePlayerNetworkMessage(playerID, recvbyte, std::make_unique<NetworkMessage>(*message));
 				});
@@ -987,8 +985,6 @@ void ProtocolGame::parsePacket(NetworkMessage& msg)
 			break;
 		case 0x90:
 			if (shouldSendQuickLootFlags()) {
-				parseLootContainer(msg);
-			} else {
 				g_dispatcher.addTask([=, playerID = player->getID(), message = std::make_shared<NetworkMessage>(msg)]() {
 					g_game.parsePlayerNetworkMessage(playerID, recvbyte, std::make_unique<NetworkMessage>(*message));
 				});
@@ -996,8 +992,6 @@ void ProtocolGame::parsePacket(NetworkMessage& msg)
 			break;
 		case 0x91:
 			if (shouldSendQuickLootFlags()) {
-				parseQuickLootBlackWhitelist(msg);
-			} else {
 				g_dispatcher.addTask([=, playerID = player->getID(), message = std::make_shared<NetworkMessage>(msg)]() {
 					g_game.parsePlayerNetworkMessage(playerID, recvbyte, std::make_unique<NetworkMessage>(*message));
 				});
