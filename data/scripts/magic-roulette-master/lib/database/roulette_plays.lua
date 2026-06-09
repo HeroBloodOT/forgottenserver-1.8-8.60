@@ -85,7 +85,10 @@ function DatabaseRoulettePlays:selectPendingPlayRewardsByPlayerGuid(guid)
 end
 
 function DatabaseRoulettePlays:updateAllRollingToPending()
-	pcall(function() db.query('UPDATE roulette_plays SET status = 1 WHERE status = 0') end)
+	local ok, err = pcall(function() db.query('UPDATE roulette_plays SET status = 1 WHERE status = 0') end)
+	if not ok then
+		print("[Roulette] updateAllRollingToPending failed: " .. tostring(err))
+	end
 end
 
 return DatabaseRoulettePlays
