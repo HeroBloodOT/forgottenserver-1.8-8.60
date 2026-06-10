@@ -1,31 +1,7 @@
 pipeline {
     agent any
 
-    environment {
-        TFS_USER = 'TFS'
-        TFS_PASS = 'TFS123DEPLOY'
-    }
-
     stages {
-        stage('Credentials') {
-            steps {
-                script {
-                    def creds = input(
-                        message: 'Credenciais Jenkins',
-                        parameters: [
-                            string(name: 'JENKINS_USER', defaultValue: 'TFS',
-                                   description: 'Usuário Jenkins'),
-                            password(name: 'JENKINS_PASS', defaultValue: 'TFS123DEPLOY',
-                                     description: 'Senha Jenkins')
-                        ]
-                    )
-                    env.JENKINS_USER = creds.JENKINS_USER
-                    env.JENKINS_PASS = creds.JENKINS_PASS
-                    echo "Usuário: ${env.JENKINS_USER}"
-                }
-            }
-        }
-
         stage('Install Dependencies') {
             steps {
                 sh '''
@@ -44,17 +20,25 @@ pipeline {
                     lua -v
                 '''
                 sh '''
-                    cd ~
-                    git clone https://github.com/simdutf/simdutf.git
-                    cd simdutf
+                    if [ -d "$HOME/simdutf" ]; then
+                        cd "$HOME/simdutf"
+                        git pull --ff-only
+                    else
+                        git clone https://github.com/simdutf/simdutf.git "$HOME/simdutf"
+                        cd "$HOME/simdutf"
+                    fi
                     cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$HOME/.local
                     cmake --build build -- -j$(nproc)
                     cmake --install build
                 '''
                 sh '''
-                    cd ~
-                    git clone https://github.com/mandreyel/mio.git
-                    cd mio
+                    if [ -d "$HOME/mio" ]; then
+                        cd "$HOME/mio"
+                        git pull --ff-only
+                    else
+                        git clone https://github.com/mandreyel/mio.git "$HOME/mio"
+                        cd "$HOME/mio"
+                    fi
                     cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$HOME/.local
                     cmake --build build -- -j$(nproc)
                     cmake --install build
@@ -69,7 +53,7 @@ pipeline {
                     git remote add upstream https://github.com/Mateuzkl/forgottenserver-downgrade-1.8-8.60.git
                     git fetch upstream main
                     git checkout main
-                    git pull upstream main
+                    git reset --hard upstream/main
                 '''
             }
         }
