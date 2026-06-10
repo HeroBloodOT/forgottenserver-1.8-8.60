@@ -96,7 +96,7 @@ local MSG_BLUE = MESSAGE_STATUS_CONSOLE_BLUE or MESSAGE_EVENT_ADVANCE or 19
 local MSG_RED  = MESSAGE_STATUS_CONSOLE_RED  or MESSAGE_STATUS_WARNING or MSG_BLUE
 
 local activeRuns = {}  -- keyed by player GUID to allow multiple GMs
-local anyPhaseFailed = false  -- set to true by logFail; reset on each /dupe start
+local phaseFailed = {}  -- keyed by player GUID; logFail sets, /dupe start resets per-GUID
 
 local function colorPhase(msg)
     local out = msg:gsub("(Phase %d+[abc]?:)", COLOR_ORANGE .. "%1" .. COLOR_RESET)
@@ -111,7 +111,9 @@ local function log(player, msg)
 end
 
 local function logFail(player, msg)
-    anyPhaseFailed = true
+    if player and player:isPlayer() then
+        phaseFailed[player:getGuid()] = true
+    end
     print(COLOR_BLUE .. "[DupeTest]" .. COLOR_RED .. "[FAIL]" .. COLOR_RESET .. " " .. colorPhase(msg))
     if player and player:isPlayer() then
         player:sendTextMessage(MSG_RED, "[DupeTest][FAIL] " .. msg)
@@ -228,10 +230,14 @@ local function verifyWithRetry(checkFn, onPass, onFail, initialDelay, retryInter
 end
 
 -- Verifica se o player ja possui itens dos tipos de teste no inventario
--- Retorna true se houver itens pre-existentes (risco de mistura)
+-- Retorna true se houver itens pre-existentes (risco de mistura) ou erro de DB
 local function hasPreExistingTestItems(player, guid)
     local cntNS = countItemsInDB(guid, QA_ITEM_NS)
     local cntST = sumStackInDB(guid, QA_ITEM_ST)
+    if cntNS == -1 or cntST == -1 then
+        logFail(player, "hasPreExistingTestItems: Erro na query DB - nao foi possivel verificar inventario.")
+        return true  -- bloqueia por seguranca (fails closed)
+    end
     if cntNS > 0 or cntST > 0 then
         return true
     end
@@ -1166,19 +1172,19 @@ function dupeAction.onSay(player, words, param)
                 if fn then fn(p) end
             end, (i - 1) * phaseDuration, pid, guid, i)
         end
-
         -- Resumo final
-        anyPhaseFailed = false
+        phaseFailed[guid] = nil
         addEvent(function(pid2, g)
             local p = safePlayer(pid2, g)
             if p then
-                if anyPhaseFailed then
+                if phaseFailed[g] then
                     logHeader(p, "=== DupeTest COMPLETO - UMA OU MAIS FASES FALHARAM ===")
                 else
                     logHeader(p, "=== DupeTest COMPLETO - TODAS AS 9 FASES PASSARAM ===")
                 end
             end
             activeRuns[g] = false
+            phaseFailed[g] = nil
         end, 9 * phaseDuration + 1500, pid, guid)
 
         logHeader(player, string.format(

@@ -470,23 +470,25 @@ void ProtocolGame::login(uint32_t characterId, uint32_t accountId, OperatingSyst
 					return;
 				}
 
-				if (!drained) {
-					g_dispatcher.addTask([self, reservedGuid]() {
-						g_game.releaseLogin(reservedGuid);
-						if (self->player) {
-							self->disconnectClient(
-								"Character data is still being saved. Please try again in a few seconds.");
-						}
-					});
-					return;
-				}
+			if (!drained) {
+				g_dispatcher.addTask([self, reservedGuid]() {
+					g_game.releaseLogin(reservedGuid);
+					if (self->player) {
+						self->disconnectClient(
+							"Character data is still being saved. Please try again in a few seconds.");
+					}
+				});
+				return;
+			}
 
+			g_threadPool.detach_task([self, reservedGuid, accountId, loginPlayer, operatingSystem]() {
 				const bool loaded = IOLoginData::loadPlayerById(loginPlayer.get(), reservedGuid, true);
 				g_dispatcher.addTask([self, reservedGuid, accountId, loaded, operatingSystem]() {
 					self->finishLogin(reservedGuid, accountId, loaded, operatingSystem);
 				});
 			});
 		});
+	});
 		return;
 	} else {
 		if (eventConnect != 0 || !getBoolean(ConfigManager::REPLACE_KICK_ON_LOGIN)) {

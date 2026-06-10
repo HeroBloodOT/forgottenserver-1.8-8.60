@@ -191,9 +191,9 @@ end
 -- SETUP / TEARDOWN
 -- ============================================================================
 local function setupTable()
-    db.query("DROP TABLE IF EXISTS `" .. STRESS_TABLE .. "`")
+    -- Usa CREATE TABLE IF NOT EXISTS para nao destruir tabela de outro GM rodando em paralelo
     return db.query(string.format([[
-        CREATE TABLE `%s` (
+        CREATE TABLE IF NOT EXISTS `%s` (
             `id`      INT UNSIGNED      NOT NULL AUTO_INCREMENT,
             `run_id`  SMALLINT UNSIGNED NOT NULL DEFAULT 0,
             `phase`   TINYINT UNSIGNED  NOT NULL DEFAULT 0,
@@ -208,8 +208,12 @@ local function setupTable()
     ]], STRESS_TABLE))
 end
 
-local function teardownTable()
-    return db.query("DROP TABLE IF EXISTS `" .. STRESS_TABLE .. "`")
+local function teardownTable(runId)
+    -- So limpa linhas do nosso run_id, nao dropa a tabela inteira (outro GM pode estar rodando)
+    if runId then
+        return db.query(string.format("DELETE FROM `%s` WHERE `run_id` = %d", STRESS_TABLE, runId))
+    end
+    return true
 end
 
 -- ============================================================================
@@ -1567,10 +1571,10 @@ function stressTalkAction.onSay(player, words, param)
 			log(player, "Stress em andamento - aguarde a conclusao antes de limpar.")
 			return false
 		end
-		if teardownTable() then
-            log(player, "Tabela stress_pr69 removida.")
+		if db.query(string.format("DELETE FROM `%s` WHERE 1=1", STRESS_TABLE)) then
+            log(player, "Tabela stress_pr69 esvaziada.")
         else
-            logFail(player, "Falha ao remover tabela (talvez ja nao exista).")
+            logFail(player, "Falha ao limpar tabela (talvez ja nao exista).")
         end
         return false
     end

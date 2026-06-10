@@ -149,7 +149,11 @@ bool SaveManager::savePlayerSync(Player* player)
 		if (auto it = pendingFlushes.find(guid); it != pendingFlushes.end()) {
 			tracked = it->second.trackedBySaveAll;
 		}
-		pendingFlushes[guid] = PendingPlayerFlush{player->getName(), std::move(*save), tracked};
+		PendingPlayerFlush pending{player->getName(), std::move(*save), tracked};
+		if (!savePendingFlushToDB(guid, pending.save)) {
+			LOG_ERROR(fmt::format("[SaveManager] WAL write failed for pending flush guid={}, save may be lost", guid));
+		}
+		pendingFlushes[guid] = std::move(pending);
 		return false; // enqueued behind in-flight flush; save will complete via onPlayerFlushed
 	}
 
@@ -226,7 +230,11 @@ bool SaveManager::schedulePlayerFlush(Player* player, bool trackSaveAll /* = fal
 		if (trackSaveAll && !oldTracked) {
 			beginTrackedFlush();
 		}
-		pendingFlushes[guid] = PendingPlayerFlush{name, std::move(*save), newTracked};
+		PendingPlayerFlush pending{name, std::move(*save), newTracked};
+		if (!savePendingFlushToDB(guid, pending.save)) {
+			LOG_ERROR(fmt::format("[SaveManager] WAL write failed for pending flush guid={}, save may be lost", guid));
+		}
+		pendingFlushes[guid] = std::move(pending);
 		return true;
 	}
 
@@ -351,6 +359,13 @@ void SaveManager::completeTrackedFlush() noexcept
 
 bool SaveManager::savePendingFlushToDB(uint32_t guid, const IOLoginData::PlayerSaveSnapshot& save)
 {
+	// Se recovery falhou para este GUID, nao sobrescrever WAL - exigir intervencao manual
+	if (failedRecoveryGuids.contains(guid)) {
+		LOG_CRITICAL(fmt::format("[SaveManager] Cannot overwrite WAL for guid={}: recovery previously failed. "
+			"Manual intervention required to clear player_save_async_pending entries.", guid));
+		return false;
+	}
+
 	Database& db = Database::getInstance();
 	static constexpr int WAL_RETRY_COUNT = 3;
 	static constexpr int WAL_RETRY_DELAY_MS = 200;
@@ -464,7 +479,9 @@ void SaveManager::recoverPendingFlushes()
 			}
 		} else {
 			transaction.rollback();
-			LOG_ERROR(fmt::format("[SaveManager] Recovery failed for guid={}, manual intervention required", guid));
+			failedRecoveryGuids.insert(guid);
+			LOG_ERROR(fmt::format("[SaveManager] Recovery failed for guid={}, manual intervention required. "
+				"WAL entries preserved; savePendingFlushToDB will skip this GUID to prevent silent data loss.", guid));
 		}
 	}
 }

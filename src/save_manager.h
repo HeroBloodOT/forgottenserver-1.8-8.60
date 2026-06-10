@@ -32,8 +32,9 @@ public:
 	 * the given GUID have been fully persisted to the database (or on timeout).
 	 *
 	 * Called from the login flow (thread pool worker) before loadPlayerById.
-	 * The callback runs on a thread pool worker and MUST NOT be long-running
-	 * from the dispatcher's perspective. Never blocks a pool worker.
+	 * The callback is delivered on the dispatcher thread. The callback should
+	 * schedule any heavy work (e.g. loadPlayerById) on the thread pool to
+	 * avoid blocking the dispatcher.
 	 */
 	void drainPlayerFlushAsync(uint32_t guid, std::function<void(bool)> callback);
 
@@ -82,6 +83,10 @@ private:
 
 	// Non-blocking callback registry for login barrier
 	std::unordered_map<uint32_t, std::vector<FlushCallback>> flushChainCallbacks;
+
+	// GUIDs whose WAL recovery failed at startup; savePendingFlushToDB will refuse to
+	// overwrite their WAL entries until manually resolved (prevents silent data loss)
+	std::unordered_set<uint32_t> failedRecoveryGuids;
 
 	static constexpr int64_t MIN_SAVE_INTERVAL_MS = 2000;
 };
