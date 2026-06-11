@@ -6730,8 +6730,6 @@ void Game::shutdown()
 		checkCreatureList.clear();
 	}
 
-	g_luaEnvironment.shutdown();
-
 	map.spawns.clear();
 	raids.clear();
 	guilds.clear();
