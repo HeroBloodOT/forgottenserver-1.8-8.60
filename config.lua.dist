@@ -143,7 +143,7 @@ quickLootMaxCorpses = 30
 
 -- Stress test: runs reactor stress tests
 -- For use test only says: /stress_reactor
-stressTest = true
+stressTest = false
 stressTestCount = 10000
 stressTestThreads = 8
 stressTestSend = true

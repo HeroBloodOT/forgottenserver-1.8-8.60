@@ -608,49 +608,62 @@ constexpr int TEST_COUNT = sizeof(TESTS) / sizeof(TESTS[0]);
 
 void runStressTests()
 {
-	const int count = getCount();
-	const int threads = getThreads();
-	const bool benchmark = ConfigManager::getBoolean(ConfigManager::STRESS_TEST_BENCHMARK);
-	LOG_INFO("{} Running (count={}, threads={})...", tag(),
-	    fmt::format(fg(fmt::color::lime_green), "{}", count),
-	    fmt::format(fg(fmt::color::lime_green), "{}", threads));
+	static std::atomic<bool> testRunning{false};
+	bool expected = false;
+	if (!testRunning.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+		LOG_ERROR("{} {} Tests already running — concurrent execution denied", tag(), failTag());
+		return;
+	}
 
-	int passed = 0;
-	int failed = 0;
+	auto runTests = [&testRunning]() {
+		const int count = getCount();
+		const int threads = getThreads();
+		const bool benchmark = ConfigManager::getBoolean(ConfigManager::STRESS_TEST_BENCHMARK);
+		LOG_INFO("{} Running (count={}, threads={})...", tag(),
+		    fmt::format(fg(fmt::color::lime_green), "{}", count),
+		    fmt::format(fg(fmt::color::lime_green), "{}", threads));
 
-	for (int i = 0; i < TEST_COUNT; ++i) {
-		if (!ConfigManager::getBoolean(TESTS[i].toggle)) {
-			LOG_INFO("{}   {} {}", tag(), skipTag(), TESTS[i].name);
-			continue;
-		}
+		int passed = 0;
+		int failed = 0;
 
-		auto start = std::chrono::steady_clock::now();
-		bool ok = TESTS[i].function();
-		auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-		    std::chrono::steady_clock::now() - start).count();
-
-		if (ok) {
-			++passed;
-			if (benchmark) {
-				LOG_INFO("{}   {} {} ({} ms)", tag(), passTag(), TESTS[i].name, elapsed);
-			} else {
-				LOG_INFO("{}   {} {}", tag(), passTag(), TESTS[i].name);
+		for (int i = 0; i < TEST_COUNT; ++i) {
+			if (!ConfigManager::getBoolean(TESTS[i].toggle)) {
+				LOG_INFO("{}   {} {}", tag(), skipTag(), TESTS[i].name);
+				continue;
 			}
-		} else {
-			++failed;
-			LOG_ERROR("{}   {} {}", tag(), failTag(), TESTS[i].name);
-		}
-	}
 
-	if (failed == 0) {
-		LOG_INFO("{} {} passed, {} skipped", tag(),
-		    fmt::format(fg(fmt::color::lime_green), "{}", passed),
-		    TEST_COUNT - passed - failed);
-	} else {
-		LOG_ERROR("{} {} passed, {} {}, {} skipped", tag(),
-		    fmt::format(fg(fmt::color::lime_green), "{}", passed),
-		    fmt::format(fg(fmt::color::red), "{}", failed),
-		    fmt::format(fg(fmt::color::red), "FAILED"),
-		    TEST_COUNT - passed - failed);
-	}
+			auto start = std::chrono::steady_clock::now();
+			bool ok = TESTS[i].function();
+			auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+			    std::chrono::steady_clock::now() - start).count();
+
+			if (ok) {
+				++passed;
+				if (benchmark) {
+					LOG_INFO("{}   {} {} ({} ms)", tag(), passTag(), TESTS[i].name, elapsed);
+				} else {
+					LOG_INFO("{}   {} {}", tag(), passTag(), TESTS[i].name);
+				}
+			} else {
+				++failed;
+				LOG_ERROR("{}   {} {}", tag(), failTag(), TESTS[i].name);
+			}
+		}
+
+		if (failed == 0) {
+			LOG_INFO("{} {} passed, {} skipped", tag(),
+			    fmt::format(fg(fmt::color::lime_green), "{}", passed),
+			    TEST_COUNT - passed - failed);
+		} else {
+			LOG_ERROR("{} {} passed, {} {}, {} skipped", tag(),
+			    fmt::format(fg(fmt::color::lime_green), "{}", passed),
+			    fmt::format(fg(fmt::color::red), "{}", failed),
+			    fmt::format(fg(fmt::color::red), "FAILED"),
+			    TEST_COUNT - passed - failed);
+		}
+
+		testRunning.store(false, std::memory_order_release);
+	};
+
+	g_threadPool.detach_task(std::move(runTests));
 }

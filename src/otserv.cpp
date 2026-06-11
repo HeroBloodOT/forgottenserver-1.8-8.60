@@ -395,6 +395,11 @@ void startServer()
 	g_dispatcher.start();
 	g_scheduler.start();
 
+	// Configure reactor production limits: fairness, time budget, and backpressure
+	g_reactor.setMaxTasksPerCycle(500);
+	g_reactor.setTimeBudget(std::chrono::milliseconds(5));
+	g_reactor.setMaxInboxSize(100000);
+
 	mainLoader(serviceManager);
 
 	std::jthread serviceThread;

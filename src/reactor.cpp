@@ -11,6 +11,12 @@
 TaskReactor g_reactor;
 thread_local const TaskReactor* TaskReactor::currentReactor = nullptr;
 
+TaskReactor::TaskReactor() :
+	maxTasksPerCycle(0),
+	timeBudget(0),
+	maxInboxSize(REACTOR_MAX_INBOX_SIZE)
+{}
+
 namespace {
 auto distantFuture() noexcept
 {
@@ -28,10 +34,10 @@ void TaskReactor::start() noexcept
 	threadState.store(THREAD_STATE_RUNNING, std::memory_order_release);
 }
 
-void TaskReactor::send(ReactorCallback&& callback)
+bool TaskReactor::send(ReactorCallback&& callback)
 {
 	if (!callback || threadState.load(std::memory_order_acquire) != THREAD_STATE_RUNNING) {
-		return;
+		return false;
 	}
 
 	const auto now = std::chrono::steady_clock::now();
@@ -44,16 +50,21 @@ void TaskReactor::send(ReactorCallback&& callback)
 
 	{
 		std::scoped_lock lock(mutex);
+		if (maxInboxSize > 0 && sendInbox.size() >= maxInboxSize) {
+			LOG_WARN("[TaskReactor] sendInbox overflow ({}), dropping task", sendInbox.size());
+			return false;
+		}
 		sendInbox.push_back(std::move(task));
 	}
 
 	conditionVariable.notify_one();
+	return true;
 }
 
-void TaskReactor::send(std::chrono::milliseconds expirationTime, ReactorCallback&& callback)
+bool TaskReactor::send(std::chrono::milliseconds expirationTime, ReactorCallback&& callback)
 {
 	if (!callback || threadState.load(std::memory_order_acquire) != THREAD_STATE_RUNNING) {
-		return;
+		return false;
 	}
 
 	const auto now = std::chrono::steady_clock::now();
@@ -66,26 +77,38 @@ void TaskReactor::send(std::chrono::milliseconds expirationTime, ReactorCallback
 
 	{
 		std::scoped_lock lock(mutex);
+		if (maxInboxSize > 0 && sendInbox.size() >= maxInboxSize) {
+			LOG_WARN("[TaskReactor] sendInbox overflow ({}), dropping timed task", sendInbox.size());
+			return false;
+		}
 		sendInbox.push_back(std::move(task));
 	}
 
 	conditionVariable.notify_one();
+	return true;
 }
 
-void TaskReactor::send(uint32_t expirationTime, ReactorCallback&& callback)
+bool TaskReactor::send(uint32_t expirationTime, ReactorCallback&& callback)
 {
 	if (expirationTime == 0) {
-		send(std::move(callback));
-		return;
+		return send(std::move(callback));
 	}
 
-	send(std::chrono::milliseconds(expirationTime), std::move(callback));
+	return send(std::chrono::milliseconds(expirationTime), std::move(callback));
 }
 
 uint32_t TaskReactor::schedule(std::chrono::milliseconds delay, ReactorCallback&& callback)
 {
 	if (!callback || threadState.load(std::memory_order_acquire) != THREAD_STATE_RUNNING) {
 		return 0;
+	}
+
+	{
+		std::scoped_lock lock(mutex);
+		if (maxInboxSize > 0 && scheduleInbox.size() >= maxInboxSize) {
+			LOG_WARN("[TaskReactor] scheduleInbox overflow ({}), dropping scheduled task", scheduleInbox.size());
+			return 0;
+		}
 	}
 
 	uint32_t identifier = nextIdentifier.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -123,6 +146,10 @@ void TaskReactor::cancel(uint32_t taskIdentifier)
 
 	{
 		std::scoped_lock lock(mutex);
+		if (maxInboxSize > 0 && cancelInbox.size() >= maxInboxSize) {
+			LOG_WARN("[TaskReactor] cancelInbox overflow ({}), dropping cancellation", cancelInbox.size());
+			return;
+		}
 		cancelInbox.push_back(taskIdentifier);
 	}
 
@@ -160,6 +187,29 @@ void TaskReactor::shutdown() noexcept
 {
 	threadState.store(THREAD_STATE_TERMINATED, std::memory_order_release);
 	conditionVariable.notify_all();
+}
+
+void TaskReactor::drain()
+{
+	const auto deadline = std::chrono::steady_clock::now() + REACTOR_DRAIN_TIMEOUT;
+	while (std::chrono::steady_clock::now() < deadline) {
+		{
+			std::scoped_lock lock(mutex);
+			if (sendInbox.empty() && scheduleInbox.empty() && taskHeap.empty() && cancelInbox.empty()) {
+				return;
+			}
+		}
+		runOnce();
+		std::this_thread::yield();
+	}
+	LOG_WARN("[TaskReactor] drain timed out after {} ms — {} tasks may be discarded",
+	         REACTOR_DRAIN_TIMEOUT.count());
+}
+
+bool TaskReactor::hasPendingTasks() const
+{
+	std::scoped_lock lock(mutex);
+	return !sendInbox.empty() || !scheduleInbox.empty() || !taskHeap.empty() || !cancelInbox.empty();
 }
 
 bool TaskReactor::isReactorThread() const noexcept
@@ -240,9 +290,24 @@ void TaskReactor::executeReadyTasks(std::vector<Task>& readyTasks)
 		return lhs.sequence < rhs.sequence;
 	});
 
+	const auto cycleStart = std::chrono::steady_clock::now();
+	uint32_t tasksExecuted = 0;
+
 	for (auto& task : readyTasks) {
 		if (!task.function) {
 			continue;
+		}
+
+		if (maxTasksPerCycle > 0 && tasksExecuted >= maxTasksPerCycle) {
+			LOG_WARN("[TaskReactor] fairness limit reached ({} tasks/cycle), deferring {} tasks",
+			         maxTasksPerCycle, readyTasks.size() - tasksExecuted);
+			break;
+		}
+
+		if (timeBudget.count() > 0 && std::chrono::steady_clock::now() - cycleStart >= timeBudget) {
+			LOG_WARN("[TaskReactor] time budget exceeded ({} ms), deferring {} tasks",
+			         timeBudget.count(), readyTasks.size() - tasksExecuted);
+			break;
 		}
 
 		try {
@@ -251,6 +316,15 @@ void TaskReactor::executeReadyTasks(std::vector<Task>& readyTasks)
 			LOG_ERROR("[TaskReactor] Unhandled task exception: {}", exception.what());
 		} catch (...) {
 			LOG_ERROR("[TaskReactor] Unhandled non-standard task exception");
+		}
+
+		++tasksExecuted;
+	}
+
+	if (tasksExecuted < readyTasks.size()) {
+		std::scoped_lock lock(mutex);
+		for (size_t i = tasksExecuted; i < readyTasks.size(); ++i) {
+			sendInbox.push_back(std::move(readyTasks[i]));
 		}
 	}
 }

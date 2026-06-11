@@ -21,13 +21,18 @@
 
 using ReactorCallback = std::move_only_function<void()>;
 
+inline constexpr size_t REACTOR_MAX_INBOX_SIZE = 100000;
+inline constexpr std::chrono::milliseconds REACTOR_DRAIN_TIMEOUT{5000};
+
 class TaskReactor
 {
 public:
+	TaskReactor();
+
 	void start() noexcept;
-	void send(ReactorCallback&& callback);
-	void send(std::chrono::milliseconds expirationTime, ReactorCallback&& callback);
-	void send(uint32_t expirationTime, ReactorCallback&& callback);
+	bool send(ReactorCallback&& callback);
+	bool send(std::chrono::milliseconds expirationTime, ReactorCallback&& callback);
+	bool send(uint32_t expirationTime, ReactorCallback&& callback);
 	uint32_t schedule(std::chrono::milliseconds delay, ReactorCallback&& callback);
 	uint32_t schedule(uint32_t delay, ReactorCallback&& callback);
 	void cancel(uint32_t taskIdentifier);
@@ -35,9 +40,15 @@ public:
 	void runLoop();
 	void runOnce();
 	void shutdown() noexcept;
+	void drain();
+
+	void setMaxTasksPerCycle(uint32_t maxTasks) noexcept { maxTasksPerCycle = maxTasks; }
+	void setTimeBudget(std::chrono::milliseconds budget) noexcept { timeBudget = budget; }
+	void setMaxInboxSize(size_t maxSize) noexcept { maxInboxSize = maxSize; }
 
 	[[nodiscard]] bool isReactorThread() const noexcept;
 	[[nodiscard]] ThreadState getState() const noexcept;
+	[[nodiscard]] bool hasPendingTasks() const;
 
 private:
 	struct Task
@@ -73,6 +84,10 @@ private:
 	std::atomic<ThreadState> threadState{THREAD_STATE_TERMINATED};
 
 	static thread_local const TaskReactor* currentReactor;
+
+	uint32_t maxTasksPerCycle = 0;
+	std::chrono::milliseconds timeBudget{0};
+	size_t maxInboxSize = REACTOR_MAX_INBOX_SIZE;
 };
 
 extern TaskReactor g_reactor;
