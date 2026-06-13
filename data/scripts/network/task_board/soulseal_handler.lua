@@ -11,10 +11,6 @@ if not configManager.getBoolean(configKeys.TASK_HUNTING_SYSTEM_ENABLED) then
     return
 end
 
-if not configManager.getBoolean(configKeys.WEEKLY_TASKS_ENABLED) then
-    return
-end
-
 if not configManager.getBoolean(configKeys.SOULSEALS_SYSTEM_ENABLED) then
     return
 end
@@ -28,6 +24,17 @@ local protocol -- set by init.lua
 
 local SoulSealHandler = {}
 
+local function isNearSoulpitObelisk(player)
+    local playerPosition = player and player:getPosition()
+    local obeliskPosition = SoulPit and SoulPit.obeliskPos
+    if not playerPosition or not obeliskPosition or playerPosition.z ~= obeliskPosition.z then
+        return false
+    end
+
+    return math.abs(playerPosition.x - obeliskPosition.x) <= 1
+        and math.abs(playerPosition.y - obeliskPosition.y) <= 1
+end
+
 -- ============================================
 -- SOULSEAL DATA (send creature list to client)
 -- ============================================
@@ -37,11 +44,17 @@ function SoulSealHandler.sendSoulSealsData(player)
         return false
     end
 
+    if not isNearSoulpitObelisk(player) then
+        player:sendTextMessage(MESSAGE_INFO_DESCR, "Stand next to the Soulpit obelisk to open Soulseals.")
+        return false
+    end
+
     local entries = SoulPit.buildSoulsealEntries()
     if #entries == 0 then
         return false -- No bestiary data available
     end
 
+    TaskBoard.sendResourceBalance(player, TaskBoard.Resources.SOULSEALS_POINTS)
     local balance = player:getSoulsealsPoints()
     return protocol.sendSoulSealsData(player, entries, balance)
 end
@@ -55,6 +68,15 @@ local soulSealActionHandler = PacketHandler(SOULSEAL_OPCODE)
 
 function soulSealActionHandler.onReceive(player, msg)
     if not player or not SoulPit then
+        return
+    end
+
+    if not player.isUsingAstraClient or not player:isUsingAstraClient() then
+        return
+    end
+
+    if not isNearSoulpitObelisk(player) then
+        player:sendTextMessage(MESSAGE_INFO_DESCR, "Stand next to the Soulpit obelisk to start a fight.")
         return
     end
 

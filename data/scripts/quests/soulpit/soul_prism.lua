@@ -6,7 +6,48 @@ if not configManager or not configManager.getBoolean or not configManager.getBoo
 	return
 end
 
+if not SoulPit then
+	dofile("data/lib/others/soulpit.lua")
+end
+if not SoulPit then
+	return
+end
+
 local soulPrism = Action()
+
+local function deliverTransformedCore(player, item, target, newCoreId, message)
+	local targetId = target:getId()
+	local added = player:addItem(newCoreId, 1)
+	if not added then
+		player:sendTextMessage(MESSAGE_INFO_DESCR, "You do not have enough room to receive the transformed soul core.")
+		return false
+	end
+
+	if not target:remove(1) then
+		added:remove(1)
+		player:sendTextMessage(MESSAGE_INFO_DESCR, "Could not consume the target soul core.")
+		return false
+	end
+
+	if not item:remove(1) then
+		added:remove(1)
+		local restored = player:addItem(targetId, 1)
+		if not restored then
+			local tile = Tile(player:getPosition())
+			if tile then
+				Game.createItem(targetId, 1, player:getPosition())
+			end
+			player:sendTextMessage(MESSAGE_INFO_DESCR, "Could not consume the soul prism. The soul core was placed on the ground.")
+		else
+			player:sendTextMessage(MESSAGE_INFO_DESCR, "Could not consume the soul prism.")
+		end
+		return false
+	end
+
+	player:getPosition():sendMagicEffect(CONST_ME_MAGIC_BLUE)
+	player:sendTextMessage(MESSAGE_INFO_DESCR, message)
+	return true
+end
 
 function soulPrism.onUse(player, item, fromPosition, target, toPosition, isHotkey)
 	if not player or not item or not target then
@@ -37,12 +78,13 @@ function soulPrism.onUse(player, item, fromPosition, target, toPosition, isHotke
 
 	-- Ominous soul core chance (2%)
 	if math.random(100) <= SoulPit.SoulCoresConfiguration.chanceToGetOminousSoulCore then
-		target:remove(1)
-		item:remove(1)
-		player:addItem(SoulPit.itemIds.ominousSoulCore, 1)
-		player:getPosition():sendMagicEffect(CONST_ME_MAGIC_BLUE)
-		player:sendTextMessage(MESSAGE_INFO_DESCR, "You have received an Ominous Soul Core!")
-		return true
+		return deliverTransformedCore(
+			player,
+			item,
+			target,
+			SoulPit.itemIds.ominousSoulCore,
+			"You have received an Ominous Soul Core!"
+		)
 	end
 
 	-- Get next difficulty level
@@ -80,14 +122,13 @@ function soulPrism.onUse(player, item, fromPosition, target, toPosition, isHotke
 	end
 
 	local newCoreId = newCoreType:getId()
-	target:remove(1)
-	item:remove(1)
-
-	player:addItem(newCoreId, 1)
-	player:getPosition():sendMagicEffect(CONST_ME_MAGIC_BLUE)
-	player:sendTextMessage(MESSAGE_INFO_DESCR, "Soul Prism used successfully! The soul core has been transformed into " .. chosen.name .. ".")
-
-	return true
+	return deliverTransformedCore(
+		player,
+		item,
+		target,
+		newCoreId,
+		"Soul Prism used successfully! The soul core has been transformed into " .. chosen.name .. "."
+	)
 end
 
 soulPrism:id(SoulPit.itemIds.soulPrism)

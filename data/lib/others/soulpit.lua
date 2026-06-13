@@ -282,6 +282,7 @@ function SoulPit.buildSoulsealEntries()
         table.insert(entries, {
             raceId = raceId,
             name = monster.name or ("Creature " .. tostring(raceId)),
+            outfit = monster.outfit,
             stars = stars,
             cost = cost,
             mastered = false,
@@ -415,9 +416,9 @@ end
 
 function SoulPit.log(message)
 	if logger and logger.info then
-		logger.info("[Soulpit] " .. tostring(message))
+		logger.info(">> [Soulpit] " .. tostring(message))
 	else
-		print("[Soulpit] " .. tostring(message))
+		print(">> [Soulpit] " .. tostring(message))
 	end
 end
 

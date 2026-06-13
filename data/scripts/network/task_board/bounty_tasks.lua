@@ -45,6 +45,7 @@ local MAX_REROLL_TOKENS = 10
 local INITIAL_REROLL_TOKENS = 3
 local FREE_REROLL_COOLDOWN = 20 * 60 * 60 -- 20 hours in seconds
 local PREFERRED_SLOT_COSTS = { 0, 300, 600, 900, 1200 }
+local PREFERRED_CLEAR_COST = 10
 
 -- Kill ranges by difficulty (min, max)
 local KILL_RANGES = {
@@ -62,10 +63,8 @@ local STAR_FILTERS = {
 	[DIFFICULTY_MASTER] = { min = 4, max = 6 },
 }
 
--- Talisman bonus scaling
-local TALISMAN_BONUS_BASE = 2.5 -- 2.5% base per level
-local TALISMAN_BONUS_CAP = 50   -- 50% cap for damage/lifeleech/loot
-local TALISMAN_BESTIARY_CAP = 100 -- 100% cap for bestiary
+local TALISMAN_STANDARD_MAX_LEVEL = 166
+local TALISMAN_BESTIARY_MAX_LEVEL = 180
 
 local function clamp(value, minValue, maxValue)
 	value = tonumber(value) or minValue
@@ -76,6 +75,12 @@ end
 
 local function getPlayerGuid(player)
 	return player:getGuid()
+end
+
+local function syncBountyBalance(player, data)
+	local balance = player:getBountyPoints()
+	data.bountyPoints = balance
+	return balance
 end
 
 -- ============================================
@@ -142,6 +147,9 @@ local function loadBountyData(playerGuid)
 				taskIndex = result.getDataInt(resultId, "active_index"),
 				claimState = result.getDataInt(resultId, "active_claim_state"),
 			}
+			if data.state == STATE_COMPLETED and data.activeTask.claimState == CLAIM_REWARD_CLICKED then
+				data.activeTask.claimState = CLAIM_REWARD_NO_CLICK
+			end
 		end
 
 		-- Talismans
@@ -176,6 +184,17 @@ local function loadBountyData(playerGuid)
 			preferredRaceId = 0,
 			unwantedRaceId = 0,
 		}
+	end
+
+	local hasActivePreferredSlot = false
+	for _, slot in ipairs(data.preferredLists) do
+		if slot.active then
+			hasActivePreferredSlot = true
+			break
+		end
+	end
+	if not hasActivePreferredSlot then
+		data.preferredLists[1].active = true
 	end
 
 	-- Initialize talisman defaults
@@ -271,14 +290,31 @@ local function getEligibleRaceIds(difficulty)
 	for raceId, entry in pairs(CustomBestiary.monstersByRaceId) do
 		local stars = entry.stars or 0
 		if stars >= starFilter.min and stars <= starFilter.max then
-			-- Must have name and be a valid creature
-			if entry.name and entry.name ~= "" then
+			-- Match Crystal: task creatures must grant experience.
+			if entry.name and entry.name ~= "" and (tonumber(entry.experience) or 0) > 0 then
 				eligible[#eligible + 1] = raceId
 			end
 		end
 	end
 
 	return eligible
+end
+
+local function getPreferredCreatureRaceIds()
+	if not CustomBestiary or not CustomBestiary.monstersByRaceId then
+		return {}
+	end
+
+	local raceIds = {}
+	for raceId, entry in pairs(CustomBestiary.monstersByRaceId) do
+		local numericRaceId = tonumber(raceId)
+		if numericRaceId and numericRaceId > 0 and numericRaceId <= 0xFFFF and
+			entry.name and entry.name ~= "" and (tonumber(entry.experience) or 0) > 0 then
+			raceIds[#raceIds + 1] = numericRaceId
+		end
+	end
+	table.sort(raceIds)
+	return raceIds
 end
 
 -- Check if a raceId is in unwanted list
@@ -537,6 +573,7 @@ end
 function BountyTasks.claimReward(player)
 	local playerGuid = getPlayerGuid(player)
 	local data = loadBountyData(playerGuid)
+	syncBountyBalance(player, data)
 
 	if data.state ~= STATE_ACTIVE and data.state ~= STATE_COMPLETED then return false end
 
@@ -556,18 +593,23 @@ function BountyTasks.claimReward(player)
 	end
 	if rewardBountyPts > 0 then
 		player:addBountyPoints(rewardBountyPts)
-		data.bountyPoints = data.bountyPoints + rewardBountyPts
 	end
+	data.bountyPoints = player:getBountyPoints()
+
+	player:sendTextMessage(MESSAGE_STATUS_DEFAULT, string.format(
+		"You have claimed your bounty task reward! (+%d exp, +%d bounty points)", rewardExp, rewardBountyPts))
 
 	-- Reset state
 	data.state = STATE_NONE
 	data.activeTask = nil
 
 	saveBountyData(playerGuid)
-	BountyTasks.sendBountyData(player)
 
 	-- Notify client of new bounty points
-	protocol.sendResourceBalance(player, protocol.RESOURCE_BOUNTY_POINTS, data.bountyPoints)
+	protocol.sendResourceBalance(player, protocol.RESOURCE_BOUNTY_POINTS, player:getBountyPoints())
+
+	-- Generate new creature list immediately (like Crystal Server)
+	BountyTasks.openBounty(player)
 
 	return true
 end
@@ -580,14 +622,19 @@ function BountyTasks.onKill(player, raceId)
 	if not data.activeTask then return false end
 	if data.activeTask.raceId ~= raceId then return false end
 
-	data.activeTask.currentKills = (data.activeTask.currentKills or 0) + 1
+	local killMultiplier = TaskBoard.getBountyKillMultiplier(player)
+	data.activeTask.currentKills = math.min(
+		(data.activeTask.currentKills or 0) + killMultiplier,
+		data.activeTask.requiredKills
+	)
 
 	if data.activeTask.currentKills >= data.activeTask.requiredKills then
-		data.activeTask.claimState = CLAIM_REWARD_CLICKED
+		data.activeTask.claimState = CLAIM_REWARD_NO_CLICK
 		data.state = STATE_COMPLETED
 	end
 
 	saveBountyData(playerGuid)
+	BountyTasks.sendBountyData(player)
 	return true
 end
 
@@ -595,38 +642,34 @@ end
 -- PREFERRED / UNWANTED LISTS
 -- ============================================
 
-function BountyTasks.unlockPreferredSlot(player, slot)
-	if slot == nil or slot < 1 or slot > MAX_PREFERRED_SLOTS then return false end
-
+function BountyTasks.unlockPreferredSlot(player, _)
 	local playerGuid = getPlayerGuid(player)
 	local data = loadBountyData(playerGuid)
+	syncBountyBalance(player, data)
 
-	-- Check if already unlocked
-	if data.preferredLists[slot] and data.preferredLists[slot].active then
-		return false
-	end
-
-	-- Check unlock cost: count active slots before the requested slot
-	local slotIndex = 1
-	for i = 1, slot - 1 do
-		if data.preferredLists[i] and data.preferredLists[i].active then
-			slotIndex = slotIndex + 1
+	local slot = nil
+	for i = 1, MAX_PREFERRED_SLOTS do
+		if data.preferredLists[i] and not data.preferredLists[i].active then
+			slot = i
+			break
 		end
 	end
-
-	local cost = PREFERRED_SLOT_COSTS[slotIndex] or 0
-	if cost > 0 and not player:removeBountyPoints(cost) then
+	if not slot then
 		return false
 	end
 
+	local cost = PREFERRED_SLOT_COSTS[slot] or 0
 	if cost > 0 then
-		data.bountyPoints = data.bountyPoints - cost
+		if not player:removeBountyPoints(cost) then
+			return false
+		end
+		protocol.sendResourceBalance(player, protocol.RESOURCE_BOUNTY_POINTS, player:getBountyPoints())
 	end
 
 	data.preferredLists[slot].active = true
+	data.bountyPoints = player:getBountyPoints()
 	saveBountyData(playerGuid)
 	BountyTasks.sendBountyData(player)
-	protocol.sendResourceBalance(player, protocol.RESOURCE_BOUNTY_POINTS, data.bountyPoints)
 
 	return true
 end
@@ -636,12 +679,21 @@ function BountyTasks.clearPreferred(player, slot)
 
 	local playerGuid = getPlayerGuid(player)
 	local data = loadBountyData(playerGuid)
+	syncBountyBalance(player, data)
 
 	if not data.preferredLists[slot] or not data.preferredLists[slot].active then
 		return false
 	end
+	if (data.preferredLists[slot].preferredRaceId or 0) <= 0 then
+		return false
+	end
+	if not player:removeBountyPoints(PREFERRED_CLEAR_COST) then
+		return false
+	end
+	protocol.sendResourceBalance(player, protocol.RESOURCE_BOUNTY_POINTS, player:getBountyPoints())
 
 	data.preferredLists[slot].preferredRaceId = 0
+	data.bountyPoints = player:getBountyPoints()
 	saveBountyData(playerGuid)
 	return BountyTasks.sendBountyData(player)
 end
@@ -651,12 +703,21 @@ function BountyTasks.clearUnwanted(player, slot)
 
 	local playerGuid = getPlayerGuid(player)
 	local data = loadBountyData(playerGuid)
+	syncBountyBalance(player, data)
 
 	if not data.preferredLists[slot] or not data.preferredLists[slot].active then
 		return false
 	end
+	if (data.preferredLists[slot].unwantedRaceId or 0) <= 0 then
+		return false
+	end
+	if not player:removeBountyPoints(PREFERRED_CLEAR_COST) then
+		return false
+	end
+	protocol.sendResourceBalance(player, protocol.RESOURCE_BOUNTY_POINTS, player:getBountyPoints())
 
 	data.preferredLists[slot].unwantedRaceId = 0
+	data.bountyPoints = player:getBountyPoints()
 	saveBountyData(playerGuid)
 	return BountyTasks.sendBountyData(player)
 end
@@ -667,6 +728,7 @@ function BountyTasks.assignPreferred(player, slot, raceId)
 
 	local playerGuid = getPlayerGuid(player)
 	local data = loadBountyData(playerGuid)
+	syncBountyBalance(player, data)
 
 	if not data.preferredLists[slot] or not data.preferredLists[slot].active then
 		return false
@@ -688,6 +750,7 @@ function BountyTasks.assignUnwanted(player, slot, raceId)
 
 	local playerGuid = getPlayerGuid(player)
 	local data = loadBountyData(playerGuid)
+	syncBountyBalance(player, data)
 
 	if not data.preferredLists[slot] or not data.preferredLists[slot].active then
 		return false
@@ -710,8 +773,47 @@ end
 local function getTalismanUpgradeCost(pathIndex, data)
 	local talisman = data.talismans[pathIndex + 1]
 	local currentTier = talisman.tier or 0
-	-- Cost scales with tier: base 50 + 25 per level
-	return 50 + (currentTier * 25)
+	return 5 + (currentTier * 12)
+end
+
+local function getTalismanMaxLevel(pathIndex)
+	return pathIndex == TALISMAN_BESTIARY and TALISMAN_BESTIARY_MAX_LEVEL or TALISMAN_STANDARD_MAX_LEVEL
+end
+
+local function getTalismanBonusHundredths(level, pathIndex)
+	level = math.max(0, tonumber(level) or 0)
+	if level == 0 then
+		return 0
+	end
+
+	if pathIndex == TALISMAN_BESTIARY then
+		if level <= 20 then
+			return level * 100
+		end
+		return math.min(2000 + ((level - 20) * 50), 10000)
+	end
+
+	if level <= 26 then
+		return 250 + ((level - 1) * 50)
+	end
+	return math.min(1500 + ((level - 26) * 25), 5000)
+end
+
+function BountyTasks.getTalismanBonus(player, raceId, pathIndex)
+	pathIndex = tonumber(pathIndex)
+	raceId = tonumber(raceId) or 0
+	if not player or pathIndex == nil or pathIndex < 0 or pathIndex > 3 or raceId <= 0 then
+		return 0
+	end
+
+	local data = loadBountyData(getPlayerGuid(player))
+	local activeTask = data.activeTask
+	if data.state ~= STATE_ACTIVE or not activeTask or activeTask.raceId ~= raceId then
+		return 0
+	end
+
+	local talisman = data.talismans[pathIndex + 1]
+	return getTalismanBonusHundredths(talisman and talisman.tier or 0, pathIndex)
 end
 
 function BountyTasks.talismanUpgrade(player, pathIndex)
@@ -721,33 +823,31 @@ function BountyTasks.talismanUpgrade(player, pathIndex)
 
 	local playerGuid = getPlayerGuid(player)
 	local data = loadBountyData(playerGuid)
+	syncBountyBalance(player, data)
 
 	local talisman = data.talismans[pathIndex + 1]
 	if not talisman then return false end
 
-	-- Cap check
-	local cap = (pathIndex == TALISMAN_BESTIARY) and TALISMAN_BESTIARY_CAP or TALISMAN_BONUS_CAP
-	local maxTiers = math.floor(cap / TALISMAN_BONUS_BASE)
-	if talisman.tier >= maxTiers then
+	if talisman.tier >= getTalismanMaxLevel(pathIndex) then
 		return false -- Already at cap
 	end
 
 	local cost = getTalismanUpgradeCost(pathIndex, data)
-	if data.bountyPoints < cost then
+	if player:getBountyPoints() < cost then
 		return false
 	end
 
 	if not player:removeBountyPoints(cost) then
 		return false
 	end
+	protocol.sendResourceBalance(player, protocol.RESOURCE_BOUNTY_POINTS, player:getBountyPoints())
 
-	data.bountyPoints = data.bountyPoints - cost
+	data.bountyPoints = player:getBountyPoints()
 	talisman.tier = talisman.tier + 1
 	talisman.upgrade = 1
 
 	saveBountyData(playerGuid)
 	BountyTasks.sendBountyData(player)
-	protocol.sendResourceBalance(player, protocol.RESOURCE_BOUNTY_POINTS, data.bountyPoints)
 
 	return true
 end
@@ -756,9 +856,10 @@ end
 -- SEND TO CLIENT
 -- ============================================
 
-function BountyTasks.sendBountyData(player)
+function BountyTasks.sendBountyData(player, includeAvailableCreatures)
 	local playerGuid = getPlayerGuid(player)
 	local data = loadBountyData(playerGuid)
+	syncBountyBalance(player, data)
 
 	-- Build creature list for protocol
 	local creatures = {}
@@ -780,7 +881,7 @@ function BountyTasks.sendBountyData(player)
 				creatures[i] = { raceId = 0, kills = 0, required = 0, reward = 0, bountyPts = 0, grade = 0, claimState = 0, index = i - 1 }
 			end
 		end
-	elseif data.state == STATE_ACTIVE and data.activeTask then
+	elseif (data.state == STATE_ACTIVE or data.state == STATE_COMPLETED) and data.activeTask then
 		-- Show only the active task
 		for i = 1, MAX_CREATURES do
 			if i == 1 then
@@ -809,9 +910,7 @@ function BountyTasks.sendBountyData(player)
 	local talismans = {}
 	for i = 1, 4 do
 		local t = data.talismans[i] or { tier = 0, upgrade = 0 }
-		local cap = (i - 1 == TALISMAN_BESTIARY) and TALISMAN_BESTIARY_CAP or TALISMAN_BONUS_CAP
-		local maxTiers = math.floor(cap / TALISMAN_BONUS_BASE)
-		local reachedCap = (t.tier >= maxTiers)
+		local reachedCap = t.tier >= getTalismanMaxLevel(i - 1)
 
 		talismans[i] = {
 			tier1 = t.tier,
@@ -819,12 +918,6 @@ function BountyTasks.sendBountyData(player)
 			upgrade = reachedCap and 0 or 1,
 			ptsToUpgrade = reachedCap and 0 or getTalismanUpgradeCost(i - 1, data),
 		}
-	end
-
-	-- Count active preferred slots
-	local activeSlots = 0
-	for _, slot in ipairs(data.preferredLists) do
-		if slot.active then activeSlots = activeSlots + 1 end
 	end
 
 	-- Build protocol data
@@ -837,9 +930,13 @@ function BountyTasks.sendBountyData(player)
 		rerollTimestamp = data.freeRerollTimestamp,
 		upgrade = data.upgrade or 0,
 		talismans = talismans,
-		preferredSlots = activeSlots,
+		preferredSlots = MAX_PREFERRED_SLOTS,
 		preferred = data.preferredLists,
+		preferredClearCost = PREFERRED_CLEAR_COST,
 	}
+	if includeAvailableCreatures then
+		protocolData.availableRaceIds = getPreferredCreatureRaceIds()
+	end
 
 	return protocol.sendBountyTaskData(player, protocolData)
 end
@@ -854,6 +951,8 @@ end
 
 function BountyTasks.saveOnLogout(player)
 	local playerGuid = getPlayerGuid(player)
+	local data = loadBountyData(playerGuid)
+	syncBountyBalance(player, data)
 	saveBountyData(playerGuid)
 	invalidateCache(playerGuid)
 end
