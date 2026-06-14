@@ -94,6 +94,19 @@ networkThreads = 2
 connectionRateLimitAllowed = 10
 connectionRateLimitMS = 500
 
+-- Reactor Limits Config
+-- WARNING: reactorMaxTasksPerCycle = 0 means unlimited; use only on dedicated hardware with controlled workloads
+-- NOTE: reactorTimeBudgetMS: max time in ms per cycle (0 = unlimited, max = 1000)
+-- NOTE: reactorMaxInboxSize: max queued tasks before dropping new ones (min = 1, max = 10000000)
+--
+-- Presets:
+--   Low    (small VPS / few players):   250 / 3  / 50000
+--   Normal (default / moderate load):   500 / 5  / 100000
+--   High   (dedicated / heavy load):    1000 / 15 / 200000
+reactorMaxTasksPerCycle = 500
+reactorTimeBudgetMS = 5
+reactorMaxInboxSize = 100000
+
 -- Deaths
 -- NOTE: Leave deathLosePercent as -1 if you want to use the default
 -- death penalty formula. For the old formula, set it to 10. For
