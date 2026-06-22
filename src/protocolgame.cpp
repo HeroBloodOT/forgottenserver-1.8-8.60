@@ -25,6 +25,7 @@
 
 #include <limits>
 #include <map>
+#include <unordered_map>
 
 uint32_t ProtocolGame::spectatorId = 1;
 std::set<std::string> ProtocolGame::spectatorNames;
@@ -40,9 +41,83 @@ constexpr uint8_t HELPER_OPCODE_CAST_ON_FOOT = 211;
 constexpr uint8_t HELPER_OPCODE_SMART_FOLLOW = 212;
 constexpr uint32_t STORAGE_ASTRA_HELPER_CAVEBOT = 99997;
 constexpr uint32_t STORAGE_ASTRA_HELPER_SMART_FOLLOW = 99998;
+constexpr auto STORE_OUTFIT_OFFERS_PATH = "data/store/gamestore.xml";
 
 using PlayerInventoryKey = std::pair<uint16_t, uint8_t>;
 using PlayerInventoryCounts = std::map<PlayerInventoryKey, uint32_t>;
+
+struct StoreOutfitOffer
+{
+	uint32_t offerId = 0;
+	uint8_t addons = 3;
+};
+
+using StoreOutfitOfferMap = std::unordered_map<uint16_t, StoreOutfitOffer>;
+
+StoreOutfitOfferMap loadStoreOutfitOffers()
+{
+	StoreOutfitOfferMap offers;
+
+	pugi::xml_document doc;
+	if (!doc.load_file(STORE_OUTFIT_OFFERS_PATH)) {
+		return offers;
+	}
+
+	auto addLookType = [&offers](uint16_t lookType, uint32_t offerId, uint8_t addons) {
+		if (lookType != 0) {
+			offers[lookType] = StoreOutfitOffer{offerId, addons};
+		}
+	};
+
+	for (auto categoryNode : doc.child("store").children("category")) {
+		for (auto offerNode : categoryNode.children("offer")) {
+			const std::string_view type = offerNode.attribute("type").as_string();
+			if (type != "outfit") {
+				continue;
+			}
+
+			const uint32_t offerId = offerNode.attribute("id").as_uint();
+			if (offerId == 0) {
+				continue;
+			}
+
+			uint32_t addonValue = offerNode.attribute("addon").as_uint(3);
+			if (addonValue > 3) {
+				addonValue = 3;
+			}
+
+			const auto addons = static_cast<uint8_t>(addonValue);
+			const auto maleLookType = static_cast<uint16_t>(offerNode.attribute("value").as_uint(offerNode.attribute("eid").as_uint()));
+			const auto femaleLookType = static_cast<uint16_t>(offerNode.attribute("femalevalue").as_uint());
+
+			addLookType(maleLookType, offerId, addons);
+			addLookType(femaleLookType, offerId, addons);
+		}
+	}
+
+	return offers;
+}
+
+const StoreOutfitOfferMap& getStoreOutfitOffers()
+{
+	static StoreOutfitOfferMap offers;
+	static std::filesystem::file_time_type lastWriteTime{};
+	static bool loaded = false;
+
+	std::error_code errorCode;
+	auto currentWriteTime = std::filesystem::last_write_time(STORE_OUTFIT_OFFERS_PATH, errorCode);
+	if (errorCode) {
+		currentWriteTime = {};
+	}
+
+	if (!loaded || currentWriteTime != lastWriteTime) {
+		offers = loadStoreOutfitOffers();
+		lastWriteTime = currentWriteTime;
+		loaded = true;
+	}
+
+	return offers;
+}
 
 uint32_t getPlayerInventoryItemAmount(const Item* item)
 {
@@ -3808,6 +3883,7 @@ void ProtocolGame::sendOutfitWindow()
 		protocolOutfits.emplace_back("Gamemaster", 75, 0);
 	}
 
+	const auto& storeOutfitOffers = getStoreOutfitOffers();
 	size_t maxProtocolOutfits = static_cast<size_t>(getInteger(ConfigManager::MAX_PROTOCOL_OUTFITS));
 	if (isOTC) {
 		maxProtocolOutfits = std::min<size_t>(maxProtocolOutfits, std::numeric_limits<uint8_t>::max());
@@ -3816,23 +3892,33 @@ void ProtocolGame::sendOutfitWindow()
 	}
 
 	for (const Outfit* outfit : outfits) {
-		if (isHiddenOutfit(outfit)) {
+		if (!outfit || isHiddenOutfit(outfit)) {
 			continue;
 		}
 
-		uint8_t addons;
-		if (!player->getOutfitAddons(*outfit, addons)) {
+		uint8_t addons = 0;
+		uint8_t mode = 0;
+		uint32_t storeOfferId = 0;
+		if (player->getOutfitAddons(*outfit, addons)) {
+			// available outfit
+		} else if (isAstra860) {
+			const auto offerIt = storeOutfitOffers.find(outfit->lookType);
+			if (offerIt == storeOutfitOffers.end()) {
+				continue;
+			}
+
+			mode = 1;
+			addons = offerIt->second.addons;
+			storeOfferId = offerIt->second.offerId;
+		} else {
 			continue;
 		}
 
-		protocolOutfits.emplace_back(outfit->name, outfit->lookType, addons);
+		protocolOutfits.emplace_back(outfit->name, outfit->lookType, addons, mode, storeOfferId);
 		if (protocolOutfits.size() >= maxProtocolOutfits) {
 			break;
 		}
 	}
-
-	std::ranges::sort(protocolOutfits,
-	          [](const ProtocolOutfit& a, const ProtocolOutfit& b) { return a.lookType < b.lookType; });
 
 	if (isOTC || isAstra860) {
 		msg.addByte(static_cast<uint8_t>(protocolOutfits.size()));
@@ -3844,6 +3930,12 @@ void ProtocolGame::sendOutfitWindow()
 		msg.add<uint16_t>(outfit.lookType);
 		msg.addString(outfit.name);
 		msg.addByte(outfit.addons);
+		if (isAstra860) {
+			msg.addByte(outfit.mode);
+			if (outfit.mode == 1) {
+				msg.add<uint32_t>(outfit.storeOfferId);
+			}
+		}
 	}
 
 	if (isOTC || isAstra860 || getVersion() != 861) {
@@ -4555,7 +4647,9 @@ void ProtocolGame::sendFeatures()
 	if (isAstraClient) {
 		features[GameFeature::ExperienceBonus] = true;
 		features[GameFeature::PlayerFamiliars] = true;
+		features[GameFeature::AstraCreatureIcons] = true;
 		features[GameFeature::AstraQuiverCountU16] = true;
+		features[GameFeature::AstraOutfitStoreMode] = true;
 	}
 	if (canSendAstraItemState()) {
 		features[GameFeature::DisplayItemDuration] = true;
