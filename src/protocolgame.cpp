@@ -4000,10 +4000,10 @@ void ProtocolGame::sendItemInspection(std::shared_ptr<Item> item, uint16_t itemI
 	msg.addString(item ? item->getName() : std::string_view(itemType.name));
 	if (item) {
 		msg.addItem(item.get(), shouldSendItemTierData(), shouldSendItemTierByte(), isOTC, shouldSendQuickLootFlags(),
-		            false, shouldSendAstraQuiverCountU16());
+		            canSendAstraItemState(), shouldSendAstraQuiverCountU16());
 	} else {
 		msg.addItem(itemId, itemCount, shouldSendItemTierData(), shouldSendItemTierByte(),
-		            shouldSendQuickLootFlags(), shouldSendAstraQuiverCountU16());
+		            shouldSendQuickLootFlags(), canSendAstraItemState(), shouldSendAstraQuiverCountU16());
 	}
 	msg.addByte(0);
 
@@ -4655,6 +4655,7 @@ void ProtocolGame::sendFeatures()
 		features[GameFeature::DisplayItemDuration] = true;
 		features[GameFeature::DisplayItemCharges] = true;
 		features[GameFeature::PackedPlayerInventory] = true;
+		features[GameFeature::AstraItemMetadata] = true;
 	}
 	features[GameFeature::QuickLootFlags] = shouldSendQuickLootFlags();
 	features[GameFeature::ThingUpgradeClassification] = false;
