@@ -81,6 +81,16 @@ public:
 	    aggressive(aggressive),
 	    id(id)
 	{}
+	Condition(const Condition& other) :
+	    endTime(other.ticks == -1 ? std::numeric_limits<int64_t>::max() : 0),
+	    subId(other.subId),
+	    ticks(other.ticks),
+	    conditionType(other.conditionType),
+	    isBuff(other.isBuff),
+	    aggressive(other.aggressive),
+	    constant(other.constant),
+	    id(other.id)
+	{}
 	virtual ~Condition() = default;
 
 	virtual bool startCondition(Creature* creature);
