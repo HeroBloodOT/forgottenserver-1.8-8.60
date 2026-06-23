@@ -81,6 +81,16 @@ public:
 	    aggressive(aggressive),
 	    id(id)
 	{}
+	Condition(const Condition& other) :
+	    endTime(other.ticks == -1 ? std::numeric_limits<int64_t>::max() : 0),
+	    subId(other.subId),
+	    ticks(other.ticks),
+	    conditionType(other.conditionType),
+	    isBuff(other.isBuff),
+	    aggressive(other.aggressive),
+	    constant(other.constant),
+	    id(other.id)
+	{}
 	virtual ~Condition() = default;
 
 	virtual bool startCondition(Creature* creature);
@@ -121,16 +131,16 @@ public:
 protected:
 	virtual bool updateCondition(const Condition* addCondition);
 
-	int64_t endTime;
-	uint32_t subId;
-	int32_t ticks;
-	ConditionType_t conditionType;
-	bool isBuff;
-	bool aggressive;
+	int64_t endTime = 0;
+	uint32_t subId = 0;
+	int32_t ticks = 0;
+	ConditionType_t conditionType = CONDITION_NONE;
+	bool isBuff = false;
+	bool aggressive = false;
 	bool constant = false;
 
 private:
-	ConditionId_t id;
+	ConditionId_t id = CONDITIONID_DEFAULT;
 };
 
 class ConditionGeneric : public Condition

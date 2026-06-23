@@ -2138,9 +2138,7 @@ void Player::onCreatureAppear(Creature* creature, bool isLogin)
 				outfitAttributes = Outfits::getInstance().addAttributes(getID(), outfitId, sex);
 			} else {
 				// Outfit no longer exists after reload, remove old attributes
-				if (outfitAttributes) {
-					outfitAttributes = false;
-				}
+				outfitAttributes = false;
 			}
 		}
 
@@ -2333,7 +2331,7 @@ void Player::updateStaminaRegen(int64_t timePassed)
 				sendTextMessage(MESSAGE_STATUS_SMALL, "You are no longer refilling stamina, because your stamina is already full.");
 			}
 		}
-	} else if (staminaPzActive) {
+	} else {
 		staminaPzActive = false;
 	}
 
@@ -2831,7 +2829,7 @@ void Player::onThink(uint32_t interval)
 	}
 
 	const int64_t timeNow = OTSYS_TIME();
-	if (client && !client->isOTCv8 && getIP() != 0 && getBoolean(ConfigManager::DLL_CHECK_KICK)) {
+	if (client && !client->isOTC && !client->isAstraClient && getIP() != 0 && getBoolean(ConfigManager::DLL_CHECK_KICK)) {
 		int64_t checkInterval = getInteger(ConfigManager::DLL_CHECK_KICK_TIME) * 1000;
 		if (timeNow - lastDllCheck >= checkInterval) {
 			lastDllCheck = timeNow;
@@ -4323,6 +4321,23 @@ void Player::updateThing(Thing* thing, uint16_t itemId, uint32_t count)
 	sendInventoryItem(static_cast<slots_t>(index), item);
 
 	// event methods
+	onUpdateInventoryItem(item, item);
+	scheduleAstraPlayerInventorySnapshot();
+}
+
+void Player::refreshThing(Thing* thing)
+{
+	Item* item = thing ? thing->getItem() : nullptr;
+	if (!item) {
+		return;
+	}
+
+	const int32_t index = getThingIndex(thing);
+	if (index == -1) {
+		return;
+	}
+
+	sendInventoryItem(static_cast<slots_t>(index), item);
 	onUpdateInventoryItem(item, item);
 	scheduleAstraPlayerInventorySnapshot();
 }
@@ -5987,7 +6002,7 @@ void Player::clearPartyInvitations()
 	invitePartyList.clear();
 }
 
-GuildEmblems_t Player::getGuildEmblem(const Player* player) const
+GuildEmblems_t Player::getGuildEmblem(const Player* player, bool useGuildMembershipEmblems) const
 {
 	if (!player) {
 		return GUILDEMBLEM_NONE;
@@ -6002,10 +6017,20 @@ GuildEmblems_t Player::getGuildEmblem(const Player* player) const
 		return GUILDEMBLEM_NONE;
 	}
 
-	if (getGuild() == playerGuild) {
-		return GUILDEMBLEM_ALLY;
-	} else if (isInWar(player)) {
+	const auto guild = getGuild();
+	if (isInWar(player)) {
 		return GUILDEMBLEM_ENEMY;
+	}
+
+	if (guild == playerGuild) {
+		if (useGuildMembershipEmblems) {
+			return GUILDEMBLEM_MEMBER;
+		}
+		return GUILDEMBLEM_ALLY;
+	}
+
+	if (guild && useGuildMembershipEmblems) {
+		return GUILDEMBLEM_OTHER;
 	}
 
 	return GUILDEMBLEM_NEUTRAL;

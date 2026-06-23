@@ -367,7 +367,7 @@ public:
 	void removePartyInvitation(Party* party);
 	void clearPartyInvitations();
 
-	GuildEmblems_t getGuildEmblem(const Player* player) const;
+	GuildEmblems_t getGuildEmblem(const Player* player, bool useGuildMembershipEmblems = false) const;
 	void reloadWarList(bool updateVisuals = true);
 
 	uint64_t getSpentMana() const { return manaSpent; }
@@ -1578,6 +1578,7 @@ private:
 	void addThing(int32_t index, Thing* thing) override;
 
 	void updateThing(Thing* thing, uint16_t itemId, uint32_t count) override;
+	void refreshThing(Thing* thing) override;
 	void replaceThing(uint32_t index, Thing* thing) override;
 
 	void removeThing(Thing* thing, uint32_t count) override;

@@ -54,6 +54,7 @@ class Weapon : public Event
 {
 public:
 	explicit Weapon(LuaScriptInterface* interface) : Event(interface) {}
+	uint16_t getWeaponAttackEffect(const Item* item) const;
 
 	virtual void configureWeapon(const ItemType& it);
 	virtual bool interruptSwing() const { return false; }
@@ -130,7 +131,7 @@ public:
 
 	WeaponAction_t action = WEAPONACTION_NONE;
 	CombatParams params;
-	WeaponType_t weaponType;
+	WeaponType_t weaponType = WEAPON_NONE;
 	std::unordered_set<uint16_t> vocationWeaponSet;
 
 	void setChainSkillValue(double value) { m_chainSkillValue = value; }

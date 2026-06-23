@@ -29,6 +29,7 @@
 #include "stress_test.h"
 #include "teleport.h"
 #include "logger.h"
+#include "tasks.h"
 #include <fmt/format.h>
 #include "globalevent.h"
 
@@ -264,6 +265,7 @@ void ScriptEnvironment::resetEnv()
 	interface = nullptr;
 	curNpc = nullptr;
 	localMap.clear();
+	localCreatureRefs.clear();
 	tempResults.clear();
 
 	std::erase_if(tempItems, [this](auto& entry) {
@@ -355,7 +357,7 @@ void ScriptEnvironment::insertItem(uint32_t uid, Item* item)
 Thing* ScriptEnvironment::getThingByUID(uint32_t uid)
 {
 	if (uid >= 0x10000000) {
-		return g_game.getCreatureByID(uid);
+		return getCreatureByUID(uid);
 	}
 
 	if (uid <= std::numeric_limits<uint16_t>::max()) {
@@ -374,6 +376,23 @@ Thing* ScriptEnvironment::getThingByUID(uint32_t uid)
 		}
 	}
 	return nullptr;
+}
+
+Creature* ScriptEnvironment::getCreatureByUID(uint32_t uid)
+{
+	auto creatureRef = g_game.getCreatureByIDShared(uid);
+	Creature* creature = creatureRef.get();
+	if (!creature) {
+		return nullptr;
+	}
+
+	auto it = std::find_if(localCreatureRefs.begin(), localCreatureRefs.end(), [creature](const auto& ref) {
+		return ref.get() == creature;
+	});
+	if (it == localCreatureRefs.end()) {
+		localCreatureRefs.push_back(std::move(creatureRef));
+	}
+	return creature;
 }
 
 Item* ScriptEnvironment::getItemByUID(uint32_t uid)
@@ -791,14 +810,27 @@ int LuaScriptInterface::luaErrorHandler(lua_State* L)
 
 bool LuaScriptInterface::callFunction(int params)
 {
-#ifdef STATS_ENABLED
 	int32_t scriptId;
 	int32_t callbackId;
 	bool timerEvent;
 	LuaScriptInterface* scriptInterface;
 	getScriptEnv()->getEventInfo(scriptId, scriptInterface, callbackId, timerEvent);
-	std::chrono::steady_clock::time_point time_point = std::chrono::steady_clock::now();
+	(void)callbackId;
+	(void)timerEvent;
+	const bool slowTaskWarning = getBoolean(ConfigManager::SLOW_TASK_WARNING);
+	uint64_t slowThresholdNs = SLOW_TASK_THRESHOLD_NS;
+	if (slowTaskWarning) {
+		const int64_t reactorBudgetMs = getInteger(ConfigManager::REACTOR_TIME_BUDGET_MS);
+		if (reactorBudgetMs > 0) {
+			slowThresholdNs = static_cast<uint64_t>(reactorBudgetMs) * 1'000'000;
+		}
+	}
+#ifdef STATS_ENABLED
+	const bool shouldMeasure = true;
+#else
+	const bool shouldMeasure = slowTaskWarning;
 #endif
+	const auto time_point = shouldMeasure ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
 
 	bool result = false;
 	int size = lua_gettop(luaState);
@@ -811,12 +843,24 @@ bool LuaScriptInterface::callFunction(int params)
 	lua_pop(luaState, 1);
 	if ((lua_gettop(luaState) + params + 1) != size) {
 		LuaScriptInterface::reportError(nullptr, "Stack size changed!");
+		lua_settop(luaState, size - params - 1);
 	}
 
+	if (shouldMeasure) {
+		const uint64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+		    std::chrono::steady_clock::now() - time_point).count();
+		if (slowTaskWarning && ns > slowThresholdNs) {
+			const auto& scriptFile = scriptInterface ? scriptInterface->getFileByIdForStats(scriptId) :
+			                                           getFileByIdForStats(scriptId);
+			LOG_WARN(">> Slow Lua callback detected: {}ms [{}]",
+			         ns / 1'000'000, scriptFile);
+		}
 #ifdef STATS_ENABLED
-	uint64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - time_point).count();
-	g_stats.addLuaStats(std::make_unique<Stat>(ns, getFileByIdForStats(scriptId), ""));
+		const auto& scriptFile = scriptInterface ? scriptInterface->getFileByIdForStats(scriptId) :
+		                                           getFileByIdForStats(scriptId);
+		g_stats.addLuaStats(std::make_unique<Stat>(ns, scriptFile, ""));
 #endif
+	}
 
 	resetScriptEnv();
 	return result;
@@ -824,6 +868,28 @@ bool LuaScriptInterface::callFunction(int params)
 
 void LuaScriptInterface::callVoidFunction(int params)
 {
+	int32_t scriptId;
+	int32_t callbackId;
+	bool timerEvent;
+	LuaScriptInterface* scriptInterface;
+	getScriptEnv()->getEventInfo(scriptId, scriptInterface, callbackId, timerEvent);
+	(void)callbackId;
+	(void)timerEvent;
+	const bool slowTaskWarning = getBoolean(ConfigManager::SLOW_TASK_WARNING);
+	uint64_t slowThresholdNs = SLOW_TASK_THRESHOLD_NS;
+	if (slowTaskWarning) {
+		const int64_t reactorBudgetMs = getInteger(ConfigManager::REACTOR_TIME_BUDGET_MS);
+		if (reactorBudgetMs > 0) {
+			slowThresholdNs = static_cast<uint64_t>(reactorBudgetMs) * 1'000'000;
+		}
+	}
+#ifdef STATS_ENABLED
+	const bool shouldMeasure = true;
+#else
+	const bool shouldMeasure = slowTaskWarning;
+#endif
+	const auto time_point = shouldMeasure ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+
 	int size = lua_gettop(luaState);
 	if (protectedCall(luaState, params, 0) != 0) {
 		LuaScriptInterface::reportError(nullptr, Lua::popString(luaState));
@@ -831,6 +897,23 @@ void LuaScriptInterface::callVoidFunction(int params)
 
 	if ((lua_gettop(luaState) + params + 1) != size) {
 		LuaScriptInterface::reportError(nullptr, "Stack size changed!");
+		lua_settop(luaState, size - params - 1);
+	}
+
+	if (shouldMeasure) {
+		const uint64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+		    std::chrono::steady_clock::now() - time_point).count();
+		if (slowTaskWarning && ns > slowThresholdNs) {
+			const auto& scriptFile = scriptInterface ? scriptInterface->getFileByIdForStats(scriptId) :
+			                                           getFileByIdForStats(scriptId);
+			LOG_WARN(">> Slow Lua callback detected: {}ms [{}]",
+			         ns / 1'000'000, scriptFile);
+		}
+#ifdef STATS_ENABLED
+		const auto& scriptFile = scriptInterface ? scriptInterface->getFileByIdForStats(scriptId) :
+		                                           getFileByIdForStats(scriptId);
+		g_stats.addLuaStats(std::make_unique<Stat>(ns, scriptFile, ""));
+#endif
 	}
 
 	resetScriptEnv();
@@ -846,6 +929,7 @@ ReturnValue LuaScriptInterface::callReturnValueFunction(int params)
 
 	if ((lua_gettop(luaState) + params + 1) != size) {
 		LuaScriptInterface::reportError(nullptr, "Stack size changed!");
+		lua_settop(luaState, size - params - 1);
 		return RETURNVALUE_NOTPOSSIBLE;
 	}
 
@@ -1251,7 +1335,17 @@ Creature* Lua::getCreature(lua_State* L, int32_t arg)
 	if (isUserdata(L, arg)) {
 		return getUserdata<Creature>(L, arg);
 	}
-	Creature* creature = g_game.getCreatureByID(getInteger<uint32_t>(L, arg));
+
+	const uint32_t creatureId = getInteger<uint32_t>(L, arg);
+	std::shared_ptr<Creature> creatureRef;
+	Creature* creature = nullptr;
+	if (LuaScriptInterface::hasScriptEnv()) {
+		creature = LuaScriptInterface::getScriptEnv()->getCreatureByUID(creatureId);
+	} else {
+		creatureRef = g_game.getCreatureByIDShared(creatureId);
+		creature = creatureRef.get();
+	}
+
 	if (!creature || !Creature::isAlive(creature) || creature->isRemoved()) {
 		return nullptr;
 	}
@@ -2048,6 +2142,14 @@ void LuaScriptInterface::registerFunctions()
 	registerEnum(CONST_ME_SMALLGREEN_ENERGY_SPARK);
 	registerEnum(CONST_ME_SMALLPINK_ENERGY_SPARK);
 
+	// 15.12 - Weapon Attack Effects
+	registerEnum(CONST_ME_SWORD_ATTACK);
+	registerEnum(CONST_ME_CLUB_ATTACK);
+	registerEnum(CONST_ME_AXE_ATTACK);
+	registerEnum(CONST_ME_MONK_STAFF_ATTACK);
+	registerEnum(CONST_ME_MONK_DAGGERS_ATTACK);
+	registerEnum(CONST_ME_FIST_ATTACK);
+
 	registerEnum(CONST_ANI_NONE);
 	registerEnum(CONST_ANI_SPEAR);
 	registerEnum(CONST_ANI_BOLT);
@@ -2464,6 +2566,8 @@ void LuaScriptInterface::registerFunctions()
 	registerEnum(GUILDEMBLEM_ALLY);
 	registerEnum(GUILDEMBLEM_ENEMY);
 	registerEnum(GUILDEMBLEM_NEUTRAL);
+	registerEnum(GUILDEMBLEM_MEMBER);
+	registerEnum(GUILDEMBLEM_OTHER);
 
 	registerEnum(SPEECHBUBBLE_NONE);
 	registerEnum(SPEECHBUBBLE_NORMAL);
@@ -2910,6 +3014,7 @@ void LuaScriptInterface::registerFunctions()
 	registerEnumIn("configKeys", ConfigManager::EXP_SHARE_FLOORS);
 	registerEnumIn("configKeys", ConfigManager::EXP_FROM_PLAYERS_LEVEL_RANGE);
 	registerEnumIn("configKeys", ConfigManager::MAX_PACKETS_PER_SECOND);
+	registerEnumIn("configKeys", ConfigManager::QUICK_LOOT_MAX_CORPSES);
 	registerEnumIn("configKeys", ConfigManager::STAMINA_REGEN_MINUTE);
 	registerEnumIn("configKeys", ConfigManager::STAMINA_REGEN_PREMIUM);
 	registerEnumIn("configKeys", ConfigManager::STAMINA_TRAINER);
@@ -2934,6 +3039,8 @@ void LuaScriptInterface::registerFunctions()
 	registerEnumIn("configKeys", ConfigManager::BOOSTED_BOSS_LOOT_BONUS);
 	registerEnumIn("configKeys", ConfigManager::BOOSTED_BOSS_KILL_BONUS);
 	registerEnumIn("configKeys", ConfigManager::DEFAULT_EXP_COLOR);
+	registerEnumIn("configKeys", ConfigManager::BOSS_DEFAULT_TIME_TO_FIGHT_AGAIN);
+	registerEnumIn("configKeys", ConfigManager::BOSS_DEFAULT_TIME_TO_DEFEAT);
 
 	// os
 	registerMethod("os", "mtime", LuaScriptInterface::luaSystemTime);
@@ -4442,6 +4549,7 @@ void LuaEnvironment::executeTimerEvent(uint32_t eventIndex)
 	// push parameters
 	for (auto parameter : std::views::reverse(timerEventDesc.parameters)) {
 		lua_rawgeti(luaState, LUA_REGISTRYINDEX, parameter);
+		const int parameterStackTop = lua_gettop(luaState);
 		if (lua_getmetatable(luaState, -1) == 0) {
 			continue;
 		}
@@ -4455,9 +4563,9 @@ void LuaEnvironment::executeTimerEvent(uint32_t eventIndex)
 			case LuaData_Monster:
 			case LuaData_Npc: {
 				auto replaceCreatureParameter = [this](uint32_t creatureId) {
-					if (auto creature = g_game.getCreatureByID(creatureId)) {
-						Lua::pushUserdata<Creature>(luaState, creature);
-						Lua::setCreatureMetatable(luaState, -1, creature);
+					if (auto creature = g_game.getCreatureByIDShared(creatureId)) {
+						Lua::pushUserdata<Creature>(luaState, creature.get());
+						Lua::setCreatureMetatable(luaState, -1, creature.get());
 					} else {
 						lua_pushnil(luaState);
 					}
@@ -4487,7 +4595,7 @@ void LuaEnvironment::executeTimerEvent(uint32_t eventIndex)
 					lua_pop(luaState, 1);
 				}
 
-				if (!Lua::getCreature(luaState, -1)) {
+				if (!Lua::getValidatedCreatureUserdata(luaState, -1)) {
 					lua_pushnil(luaState);
 					lua_replace(luaState, -2);
 				}
@@ -4510,6 +4618,7 @@ void LuaEnvironment::executeTimerEvent(uint32_t eventIndex)
 				break;
 			}
 		}
+		lua_settop(luaState, parameterStackTop);
 	}
 
 	// call the function
@@ -4517,7 +4626,7 @@ void LuaEnvironment::executeTimerEvent(uint32_t eventIndex)
 		ScriptEnvironment* env = getScriptEnv();
 		env->setTimerEvent();
 		env->setScriptId(timerEventDesc.scriptId, this);
-		callFunction(timerEventDesc.parameters.size());
+		callVoidFunction(timerEventDesc.parameters.size());
 	} else {
 		LOG_ERROR("[Error - LuaScriptInterface::executeTimerEvent] Call stack overflow");
 	}
